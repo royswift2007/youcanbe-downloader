@@ -1,9 +1,30 @@
+import re
+import shlex
+
 from core.youtube_models import DOWNLOAD_PRESET_FORMATS, P1080_FMT, YouTubeDownloadProfile, YouTubeTaskRecord
 
 
 INVALID_FILENAME_CHARS = r'\/:*?"<>|'
 AUDIO_OUTPUT_FORMATS = ("m4a", "mp3", "opus", "wav", "flac")
 VIDEO_OUTPUT_FORMATS = ("mp4", "mkv")
+TIME_RANGE_SEPARATOR = "-"
+ADVANCED_ARG_CONFLICTS = {
+    "-f",
+    "--format",
+    "-o",
+    "--output",
+    "--cookies",
+    "--cookies-from-browser",
+    "--proxy",
+    "--download-sections",
+    "--sponsorblock-remove",
+    "--sponsorblock-mark",
+    "--sponsorblock",
+    "--extractor-args",
+    "--ffmpeg-location",
+}
+
+_TIME_CODE_RE = re.compile(r"^(?:\d{1,2}:)?\d{1,2}:\d{2}$")
 
 
 def _get_selected_preset_key(frame):
@@ -13,6 +34,42 @@ def _get_selected_preset_key(frame):
 def _show_input_warning(frame, message):
     frame.manager.log(f"⚠️ 输入值无效，已回退默认值: {message}", "WARN")
     frame.app.SilentMessagebox.showwarning("提示", message)
+
+
+def _is_time_code(value):
+    return bool(_TIME_CODE_RE.match(value or ""))
+
+
+def _normalize_download_sections(value):
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+
+    if TIME_RANGE_SEPARATOR not in raw:
+        return ""
+
+    start, end = [part.strip() for part in raw.split(TIME_RANGE_SEPARATOR, 1)]
+    if not start or not end:
+        return ""
+    if not _is_time_code(start) or not _is_time_code(end):
+        return ""
+    return f"*{start}-{end}"
+
+
+def _extract_advanced_flags(advanced_args):
+    if not advanced_args:
+        return []
+    try:
+        tokens = shlex.split(advanced_args)
+    except ValueError:
+        tokens = advanced_args.split()
+    flags = []
+    for token in tokens:
+        if not token.startswith("-"):
+            continue
+        flag = token.split("=", 1)[0]
+        flags.append(flag)
+    return flags
 
 
 def _coerce_int_input(frame, var_name, default, minimum=None, maximum=None, label="数值"):
@@ -66,11 +123,38 @@ def build_profile_from_input(frame):
     keep_video = bool(getattr(frame, "keep_video_var", None).get()) if getattr(frame, "keep_video_var", None) else False
     h264_compat = bool(getattr(frame, "h264_compat_var", None).get()) if getattr(frame, "h264_compat_var", None) else False
     use_po_token = bool(getattr(frame, "use_po_token_var", None).get()) if getattr(frame, "use_po_token_var", None) else False
+    raw_download_sections = getattr(frame, "download_sections_var", None).get().strip() if getattr(frame, "download_sections_var", None) else ""
+    download_sections = _normalize_download_sections(raw_download_sections)
+    if raw_download_sections and not download_sections:
+        _show_input_warning(frame, "区段格式无效，请使用 HH:MM:SS-MM:SS 或 MM:SS-MM:SS")
+        download_sections = ""
+    sponsorblock_enabled = bool(getattr(frame, "sponsorblock_enabled_var", None).get()) if getattr(frame, "sponsorblock_enabled_var", None) else False
+    sponsorblock_categories = getattr(frame, "sponsorblock_categories_var", None).get().strip() if getattr(frame, "sponsorblock_categories_var", None) else ""
+    proxy_url = getattr(frame, "proxy_url_var", None).get().strip() if getattr(frame, "proxy_url_var", None) else ""
+    advanced_args = getattr(frame, "advanced_args_var", None).get().strip() if getattr(frame, "advanced_args_var", None) else ""
+    cookies_mode = getattr(frame, "cookies_mode_var", None).get().strip() if getattr(frame, "cookies_mode_var", None) else "file"
+    cookies_browser = getattr(frame, "cookies_browser_var", None).get().strip() if getattr(frame, "cookies_browser_var", None) else ""
+    subtitle_mode = getattr(frame, "subtitle_mode_var", None).get().strip() if getattr(frame, "subtitle_mode_var", None) else "none"
+    subtitle_langs = getattr(frame, "subtitle_langs_var", None).get().strip() if getattr(frame, "subtitle_langs_var", None) else ""
+    subtitle_format = getattr(frame, "subtitle_format_var", None).get().strip() if getattr(frame, "subtitle_format_var", None) else ""
+    embed_subs = bool(getattr(frame, "embed_subs_var", None).get()) if getattr(frame, "embed_subs_var", None) else False
+    write_subs = bool(getattr(frame, "write_subs_var", None).get()) if getattr(frame, "write_subs_var", None) else True
+
+    if cookies_mode == "browser" and not cookies_browser:
+        _show_input_warning(frame, "已选择 browser cookies，但未填写浏览器名称")
+        cookies_mode = "file"
+    if sponsorblock_enabled and not sponsorblock_categories:
+        sponsorblock_categories = "sponsor"
 
     frame.manager.max_concurrent = concurrent
 
     return YouTubeDownloadProfile(
         format=format_value,
+        subtitle_mode=subtitle_mode or "none",
+        subtitle_langs=subtitle_langs,
+        subtitle_format=subtitle_format,
+        embed_subs=embed_subs,
+        write_subs=write_subs,
         retries=retries,
         retry_interval=retry_interval,
         sleep_interval=sleep_interval,
@@ -90,7 +174,34 @@ def build_profile_from_input(frame):
         keep_video=keep_video,
         h264_compat=h264_compat,
         use_po_token=use_po_token,
+        download_sections=download_sections,
+        sponsorblock_enabled=sponsorblock_enabled,
+        sponsorblock_categories=sponsorblock_categories,
+        proxy_url=proxy_url,
+        advanced_args=advanced_args,
+        cookies_mode=cookies_mode,
+        cookies_browser=cookies_browser,
     )
+
+
+def validate_proxy_url(frame, proxy_url):
+    if not proxy_url:
+        return True
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", proxy_url):
+        _show_input_warning(frame, "代理格式无效，请包含协议头，例如 http:// 或 socks5://")
+        return False
+    return True
+
+
+def validate_advanced_args(frame, advanced_args):
+    if not advanced_args:
+        return True
+    flags = _extract_advanced_flags(advanced_args)
+    conflicts = [flag for flag in flags if flag in ADVANCED_ARG_CONFLICTS]
+    if conflicts:
+        _show_input_warning(frame, f"高级参数包含冲突项: {', '.join(conflicts)}")
+        return False
+    return True
 
 
 def validate_youtube_url(frame, url):
@@ -184,6 +295,16 @@ def sync_output_format_by_preset(frame):
         if frame.output_format_var.get().strip() not in VIDEO_OUTPUT_FORMATS:
             frame.output_format_var.set("mp4")
     return preset_key
+
+
+def validate_download_sections(frame, raw_value):
+    if not raw_value:
+        return True
+    normalized = _normalize_download_sections(raw_value)
+    if not normalized:
+        _show_input_warning(frame, "区段格式无效，请使用 HH:MM:SS-MM:SS 或 MM:SS-MM:SS")
+        return False
+    return True
 
 
 def apply_task_save_path(frame, task):

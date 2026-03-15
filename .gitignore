@@ -27,3 +27,26 @@ __pycache__/
 # 例如：downloads/
 # 忽略所有的 node_modules 文件夹
 node_modules/
+
+
+# --- 1. 媒体文件（绝对不要进 Git） ---
+*.mp4
+*.mp3
+*.mkv
+*.ts
+
+# --- 2. 隐私与安全（重要！） ---
+*cookies.txt
+*.sqlite
+history.json
+
+# --- 3. 临时文件夹与过程文件 ---
+# 既然你有大量的阶段方案和重命名记录，如果不需要备份它们，就关掉
+plans/other/
+temp/
+ai交接.txt
+
+# --- 4. 之前提到的基础项 ---
+node_modules/
+*.exe
+*.log

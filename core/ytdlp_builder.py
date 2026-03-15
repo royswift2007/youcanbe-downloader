@@ -1,4 +1,5 @@
 import os
+import shlex
 
 from core.youtube_models import AUDIO_FMT
 from core.po_token_manager import get_manager as _get_pot_manager
@@ -14,11 +15,20 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
 
     cmd = [yt_dlp_path]
 
-    if task.needs_cookies and os.path.exists(cookies_file_path):
+    cookies_mode = getattr(task.profile, "cookies_mode", "file") or "file"
+    cookies_browser = getattr(task.profile, "cookies_browser", "") or ""
+    if cookies_mode == "browser" and cookies_browser:
+        cmd.extend(["--cookies-from-browser", cookies_browser])
+    elif task.needs_cookies and os.path.exists(cookies_file_path):
         cmd.extend(["--cookies", cookies_file_path])
 
     fmt = task.profile.format
     sub_lang = task.profile.sub_lang
+    subtitle_mode = getattr(task.profile, "subtitle_mode", "none") or "none"
+    subtitle_langs = getattr(task.profile, "subtitle_langs", "") or ""
+    subtitle_format = getattr(task.profile, "subtitle_format", "") or ""
+    embed_subs = bool(getattr(task.profile, "embed_subs", False))
+    write_subs = bool(getattr(task.profile, "write_subs", True))
     speed_limit = task.profile.speed_limit
     merge_output_format = getattr(task.profile, "merge_output_format", "mp4") or "mp4"
     audio_quality = getattr(task.profile, "audio_quality", "192") or "192"
@@ -30,6 +40,11 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
     write_chapters = bool(getattr(task.profile, "write_chapters", False))
     keep_video = bool(getattr(task.profile, "keep_video", False))
     h264_compat = bool(getattr(task.profile, "h264_compat", False))
+    download_sections = getattr(task.profile, "download_sections", "") or ""
+    sponsorblock_enabled = bool(getattr(task.profile, "sponsorblock_enabled", False))
+    sponsorblock_categories = getattr(task.profile, "sponsorblock_categories", "") or ""
+    proxy_url = getattr(task.profile, "proxy_url", "") or ""
+    advanced_args = getattr(task.profile, "advanced_args", "") or ""
 
     if fmt:
         cmd.extend(["-f", fmt])
@@ -86,8 +101,48 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
     if sleep_requests > 0:
         cmd.extend(["--sleep-requests", str(sleep_requests)])
 
-    if sub_lang:
-        cmd.extend(["--write-subs", "--sub-lang", sub_lang, "--embed-subs"])
+    resolved_subtitle_mode = subtitle_mode
+    resolved_sub_langs = subtitle_langs
+    resolved_embed_subs = embed_subs
+    resolved_write_subs = write_subs
+
+    if resolved_subtitle_mode == "none" and sub_lang:
+        resolved_subtitle_mode = "manual"
+        if not resolved_sub_langs:
+            resolved_sub_langs = sub_lang
+        if resolved_embed_subs is False:
+            resolved_embed_subs = True
+
+    if resolved_subtitle_mode in {"manual", "both"}:
+        cmd.append("--write-subs")
+    if resolved_subtitle_mode in {"auto", "both"}:
+        cmd.append("--write-auto-subs")
+
+    if resolved_subtitle_mode != "none" and resolved_sub_langs:
+        cmd.extend(["--sub-langs", resolved_sub_langs])
+
+    if resolved_subtitle_mode != "none" and subtitle_format:
+        cmd.extend(["--sub-format", subtitle_format])
+
+    if resolved_subtitle_mode != "none":
+        if resolved_embed_subs:
+            cmd.append("--embed-subs")
+
+    if download_sections:
+        cmd.extend(["--download-sections", download_sections])
+
+    if sponsorblock_enabled:
+        categories = sponsorblock_categories.strip() or "sponsor"
+        cmd.extend(["--sponsorblock-remove", categories])
+
+    if proxy_url:
+        cmd.extend(["--proxy", proxy_url])
+
+    if advanced_args:
+        try:
+            cmd.extend(shlex.split(advanced_args))
+        except ValueError:
+            cmd.extend(advanced_args.split())
 
     # PO Token 注入（方案 B）
     use_po_token = bool(getattr(task.profile, "use_po_token", False))

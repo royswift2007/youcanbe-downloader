@@ -59,6 +59,11 @@ DOWNLOAD_PRESET_FORMATS = {
 class YouTubeDownloadProfile:
     format: Optional[str] = None
     sub_lang: Optional[str] = None
+    subtitle_mode: str = "none"
+    subtitle_langs: str = ""
+    subtitle_format: str = ""
+    embed_subs: bool = False
+    write_subs: bool = True
     speed_limit: int = 0
     retries: int = 3
     retry_interval: int = 0
@@ -78,6 +83,13 @@ class YouTubeDownloadProfile:
     keep_video: bool = False
     h264_compat: bool = False
     use_po_token: bool = False
+    download_sections: str = ""
+    sponsorblock_enabled: bool = False
+    sponsorblock_categories: str = ""
+    proxy_url: str = ""
+    advanced_args: str = ""
+    cookies_mode: str = "file"
+    cookies_browser: str = ""
 
 
 @dataclass

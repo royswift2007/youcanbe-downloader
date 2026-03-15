@@ -1,3 +1,4 @@
+import copy
 import os
 import queue
 import re
@@ -8,15 +9,18 @@ import time
 from core.history_repo import YouTubeHistoryRepository
 from core.youtube_metadata import detect_auth_diagnostic
 from core.youtube_models import (
+    AUDIO_FMT,
     TASK_STATUS_FAILED,
     TASK_STATUS_RUNNING,
     TASK_STATUS_STOPPED,
     TASK_STATUS_SUCCESS,
     TASK_STATUS_WAITING,
+    YouTubeTaskRecord,
 )
 from core.ytdlp_builder import build_ytdlp_command
 
 YTDLP_PROGRESS_RE = re.compile(r'\[download\]\s+([\d.]+)%.*?at\s+([\d.]+)([KMG]?i?B/s)', re.IGNORECASE)
+SECTION_RANGE_RE = re.compile(r'^\*(?P<start>(?:\d{1,2}:)?\d{1,2}:\d{2})-(?P<end>(?:\d{1,2}:)?\d{1,2}:\d{2})$')
 
 
 def convert_to_MBps(value, unit):
@@ -218,6 +222,222 @@ class YouTubeDownloadManager:
             if hasattr(self.app, 'top_bar'):
                 self.app.root.after(0, self.app.top_bar.refresh_auth_status)
 
+    def _build_command_summary(self, task, output_dir, command):
+        summary = {
+            "task_id": task.id,
+            "url": task.url,
+            "preset_key": getattr(task.profile, "preset_key", "manual"),
+            "format": task.profile.format,
+            "output_dir": output_dir,
+            "audio_mode": task.profile.format == AUDIO_FMT,
+            "use_cookies": bool(task.needs_cookies),
+            "use_po_token": bool(getattr(task.profile, "use_po_token", False)),
+            "merge_output_format": getattr(task.profile, "merge_output_format", "mp4"),
+            "custom_filename": task.profile.custom_filename or "",
+            "download_sections": getattr(task.profile, "download_sections", ""),
+            "sponsorblock_enabled": bool(getattr(task.profile, "sponsorblock_enabled", False)),
+            "sponsorblock_categories": getattr(task.profile, "sponsorblock_categories", ""),
+            "proxy_url": getattr(task.profile, "proxy_url", ""),
+            "advanced_args": getattr(task.profile, "advanced_args", ""),
+            "cookies_mode": getattr(task.profile, "cookies_mode", "file"),
+            "cookies_browser": getattr(task.profile, "cookies_browser", ""),
+            "speed_limit": task.profile.speed_limit,
+            "retry_interval": getattr(task.profile, "retry_interval", 0),
+            "sleep_interval": getattr(task.profile, "sleep_interval", 0),
+            "max_sleep_interval": getattr(task.profile, "max_sleep_interval", 0),
+            "sleep_requests": getattr(task.profile, "sleep_requests", 0),
+        }
+        if command:
+            safe_preview = " ".join(str(part) for part in command[:12])
+            if len(command) > 12:
+                safe_preview = f"{safe_preview} ..."
+            summary["command_preview"] = safe_preview
+        return summary
+
+    def _log_command_summary(self, task, output_dir, command):
+        summary = self._build_command_summary(task, output_dir, command)
+        self.log("[摘要] 准备执行下载命令")
+        self.log(
+            "[摘要] task_id={task_id} | preset={preset_key} | format={format} | audio={audio_mode}".format(**summary)
+        )
+        self.log(f"[摘要] url={summary['url']}")
+        self.log(
+            "[摘要] output={output_dir} | cookies={use_cookies} | po_token={use_po_token} | merge={merge_output_format}".format(
+                **summary
+            )
+        )
+        if summary.get("custom_filename"):
+            self.log(f"[摘要] custom_filename={summary['custom_filename']}")
+        if summary.get("download_sections"):
+            self.log(f"[摘要] sections={summary['download_sections']}")
+        if summary.get("sponsorblock_enabled"):
+            categories = summary.get("sponsorblock_categories") or "sponsor"
+            self.log(f"[摘要] sponsorblock={categories}")
+        if summary.get("proxy_url"):
+            self.log(f"[摘要] proxy={summary['proxy_url']}")
+        if summary.get("cookies_mode") == "browser" and summary.get("cookies_browser"):
+            self.log(f"[摘要] cookies_browser={summary['cookies_browser']}")
+        if summary.get("advanced_args"):
+            self.log(f"[摘要] advanced_args={summary['advanced_args']}")
+        extra_options = []
+        if summary.get("speed_limit"):
+            extra_options.append(f"speed_limit={summary['speed_limit']}M")
+        if summary.get("retry_interval"):
+            extra_options.append(f"retry_interval={summary['retry_interval']}")
+        if summary.get("sleep_interval"):
+            extra_options.append(f"sleep_interval={summary['sleep_interval']}")
+        if summary.get("max_sleep_interval"):
+            extra_options.append(f"max_sleep_interval={summary['max_sleep_interval']}")
+        if summary.get("sleep_requests"):
+            extra_options.append(f"sleep_requests={summary['sleep_requests']}")
+        if extra_options:
+            self.log(f"[摘要] options={', '.join(extra_options)}")
+        if summary.get("command_preview"):
+            self.log(f"[摘要] cmd_preview={summary['command_preview']}")
+        return summary
+
+    def _classify_failure_stage(self, error_output_buffer):
+        if not error_output_buffer:
+            return "download"
+        text = "\n".join(error_output_buffer).lower()
+        postprocess_keywords = [
+            "postprocessor",
+            "post-process",
+            "ffmpeg",
+            "merging",
+            "recode",
+            "conversion",
+        ]
+        if any(keyword in text for keyword in postprocess_keywords):
+            return "postprocess"
+        return "download"
+
+    def _parse_download_section_range(self, raw_value):
+        match = SECTION_RANGE_RE.match((raw_value or "").strip())
+        if not match:
+            return None, None
+        return match.group("start"), match.group("end")
+
+    def _find_media_output(self, output_dir, base_name):
+        if not os.path.isdir(output_dir):
+            return ""
+        media_exts = {".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".opus", ".wav", ".flac", ".mov"}
+        candidates = []
+        for name in os.listdir(output_dir):
+            full_path = os.path.join(output_dir, name)
+            if not os.path.isfile(full_path):
+                continue
+            root, ext = os.path.splitext(name)
+            if root != base_name:
+                continue
+            if ext.lower() not in media_exts:
+                continue
+            candidates.append(full_path)
+        candidates.sort(key=lambda path: os.path.getsize(path), reverse=True)
+        return candidates[0] if candidates else ""
+
+    def _run_local_section_fallback(self, task, output_dir):
+        section_value = getattr(task.profile, "download_sections", "") or ""
+        start_time, end_time = self._parse_download_section_range(section_value)
+        if not start_time or not end_time:
+            return False, "区段下载 fallback 无法解析时间范围"
+
+        temp_base = f"ycb_section_full_{task.id}"
+        fallback_profile = copy.copy(task.profile)
+        fallback_profile.download_sections = ""
+        fallback_profile.custom_filename = temp_base
+        fallback_profile.sponsorblock_enabled = False
+        fallback_profile.sponsorblock_categories = ""
+        fallback_profile.advanced_args = ""
+        fallback_task = YouTubeTaskRecord(
+            url=task.url,
+            save_path=task.save_path,
+            profile=fallback_profile,
+            task_type=task.task_type,
+        )
+        fallback_task.needs_cookies = task.needs_cookies
+        fallback_task.archive_root = getattr(task, "archive_root", "")
+        fallback_task.archive_subdir = getattr(task, "archive_subdir", "")
+
+        self.log(f"[回退] 区段下载失败，尝试全量下载后本地裁剪: {start_time}-{end_time}", "WARN")
+        if getattr(task.profile, "sponsorblock_enabled", False):
+            self.log("[回退] 为提高成功率，区段 fallback 阶段暂不附加 SponsorBlock", "WARN")
+        if getattr(task.profile, "advanced_args", ""):
+            self.log("[回退] 为提高成功率，区段 fallback 阶段暂不附加高级参数", "WARN")
+
+        fallback_cmd = build_ytdlp_command(
+            self.yt_dlp_path,
+            self.ffmpeg_path,
+            self.cookies_file_path,
+            fallback_task,
+        )
+
+        try:
+            proc = subprocess.run(
+                fallback_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                startupinfo=self.startupinfo,
+            )
+        except Exception as exc:
+            return False, f"区段 fallback 全量下载启动失败: {exc}"
+
+        if proc.returncode != 0:
+            output = (proc.stdout or "").strip().replace("\r", " ").replace("\n", " ")
+            return False, f"区段 fallback 全量下载失败: {output[:220]}"
+
+        source_path = self._find_media_output(output_dir, temp_base)
+        if not source_path:
+            return False, "区段 fallback 未找到全量下载输出文件"
+
+        final_base = task.profile.custom_filename or (task.final_title or f"section_{task.id}")
+        _, source_ext = os.path.splitext(source_path)
+        target_path = os.path.join(output_dir, f"{final_base}{source_ext}")
+
+        ffmpeg_cmd = [
+            self.ffmpeg_path,
+            "-y",
+            "-ss",
+            start_time,
+            "-to",
+            end_time,
+            "-i",
+            source_path,
+            "-c",
+            "copy",
+            target_path,
+        ]
+
+        try:
+            cut_proc = subprocess.run(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                startupinfo=self.startupinfo,
+            )
+        except Exception as exc:
+            return False, f"区段 fallback 裁剪失败: {exc}"
+
+        if cut_proc.returncode != 0:
+            output = (cut_proc.stdout or "").strip().replace("\r", " ").replace("\n", " ")
+            return False, f"区段 fallback FFmpeg 裁剪失败: {output[:220]}"
+
+        try:
+            if os.path.exists(source_path):
+                os.remove(source_path)
+        except OSError:
+            pass
+
+        task.archive_output_path = output_dir
+        self.log(f"[完成] 区段 fallback 裁剪成功: {os.path.basename(target_path)}")
+        return True, ""
+
     def _run_ytdlp_task(self, task):
         """执行 yt-dlp 下载链路。"""
         if task.profile.custom_filename:
@@ -255,9 +475,24 @@ class YouTubeDownloadManager:
                     if error_out.strip():
                         raw_preview = error_out.strip().replace("\r", " ").replace("\n", " ")
                         self.log(f"[日志] 标题获取原始日志: {raw_preview[:220]}")
+
+                    task.latest_error_summary = error_out.strip()[:300] if error_out.strip() else "标题获取失败"
+                    self._save_failed_history(
+                        task,
+                        failure_stage="title_fetch",
+                        failure_summary=task.latest_error_summary,
+                        return_code=title_result.get("returncode"),
+                    )
             except Exception as exc:
                 task.final_title = task.get_display_name()
+                task.latest_error_summary = str(exc)[:300]
                 self.log(f"[错误] 获取标题异常: {exc},使用默认名称: {task.final_title}")
+                self._save_failed_history(
+                    task,
+                    failure_stage="title_fetch",
+                    failure_summary=task.latest_error_summary,
+                    return_code=None,
+                )
 
             self.app.root.after(0, self.update_list)
         
@@ -265,12 +500,33 @@ class YouTubeDownloadManager:
         if task.needs_cookies:
             self.log("此任务使用 cookies 下载")
 
-        cmd = build_ytdlp_command(
-            self.yt_dlp_path,
-            self.ffmpeg_path,
-            self.cookies_file_path,
-            task,
-        )
+        try:
+            cmd = build_ytdlp_command(
+                self.yt_dlp_path,
+                self.ffmpeg_path,
+                self.cookies_file_path,
+                task,
+            )
+            output_dir = task.resolve_output_dir() if hasattr(task, "resolve_output_dir") else task.save_path
+        except Exception as exc:
+            task.status = TASK_STATUS_FAILED
+            task.end_time = time.time()
+            task.latest_error_summary = f"命令构建失败: {exc}"
+            self.record_runtime_issue(
+                f"任务命令构建失败: {task.get_display_name()}",
+                task.latest_error_summary,
+                level="ERROR",
+            )
+            self.log(f"[错误] 命令构建失败: [{task.id}] - {exc}")
+            self._save_failed_history(
+                task,
+                failure_stage="command_build",
+                failure_summary=str(exc)[:300],
+                return_code=None,
+            )
+            return
+
+        self._log_command_summary(task, output_dir, cmd)
         max_retries = task.profile.retries
 
         for attempt in range(max_retries + 1):
@@ -287,7 +543,6 @@ class YouTubeDownloadManager:
                 time.sleep(5)
             try:
                 error_output_buffer = []
-                output_dir = task.resolve_output_dir() if hasattr(task, "resolve_output_dir") else task.save_path
                 os.makedirs(output_dir, exist_ok=True)
                 task.archive_output_path = output_dir
                 task.process = subprocess.Popen(
@@ -340,6 +595,23 @@ class YouTubeDownloadManager:
                     return
 
                 if attempt == max_retries:
+                    fallback_ok = False
+                    section_value = getattr(task.profile, "download_sections", "") or ""
+                    if section_value:
+                        fallback_ok, fallback_error = self._run_local_section_fallback(task, output_dir)
+                        if fallback_ok:
+                            task.status = TASK_STATUS_SUCCESS
+                            task.end_time = time.time()
+                            duration = task.end_time - (task.start_time or task.add_time)
+                            end_time_str = time.strftime("%H:%M:%S", time.localtime(task.end_time))
+                            self.log(f"[完成] 区段回退后任务完成 | 时间: {end_time_str} | 耗时: {duration:.1f}秒")
+                            self.log(f" 标题: {task.get_display_name()}")
+                            self._save_to_history(task)
+                            self.log("-" * 40)
+                            return
+                        if fallback_error:
+                            error_output_buffer.append(fallback_error)
+
                     task.status = TASK_STATUS_FAILED
                     task.end_time = time.time()
                     duration = task.end_time - (task.start_time or task.add_time)
@@ -356,6 +628,8 @@ class YouTubeDownloadManager:
                             self._notify_auth_issue(diagnostic)
                             failure_summary = diagnostic.summary or failure_summary
                             failure_stage = "auth" if diagnostic.is_auth_related else "network"
+                        else:
+                            failure_stage = self._classify_failure_stage(error_output_buffer)
                     task.latest_error_summary = failure_summary or f"下载失败，退出码 {return_code}"
                     self.record_runtime_issue(
                         f"任务失败: {task.get_display_name()}",
@@ -400,6 +674,12 @@ class YouTubeDownloadManager:
             else:
                 self.log("已保存到 JSON 历史备份")
         except Exception as exc:
+            task.latest_error_summary = str(exc)[:300]
+            self.record_runtime_issue(
+                f"历史写入失败: {task.get_display_name()}",
+                task.latest_error_summary,
+                level="WARN",
+            )
             self.log(f"保存历史记录失败: {exc}")
 
     def _save_failed_history(self, task, failure_stage="download", failure_summary="", return_code=None):
@@ -416,6 +696,12 @@ class YouTubeDownloadManager:
             else:
                 self.log("已保存失败记录到 JSON 历史备份")
         except Exception as exc:
+            task.latest_error_summary = str(exc)[:300]
+            self.record_runtime_issue(
+                f"历史写入失败: {task.get_display_name()}",
+                task.latest_error_summary,
+                level="WARN",
+            )
             self.log(f"保存失败历史记录失败: {exc}")
 
     def stop_task(self, task_id):
