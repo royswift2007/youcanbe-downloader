@@ -1,0 +1,30 @@
+﻿yt-dlp --cookies-from-browser firefox -F https://www.youtube.com/watch?v=6yQH9jUqttE
+
+yt-dlp -F https://www.bilibili.com/video/BV1RfxKz4EKh/?spm_id_from=333.1007.tianma.1-2-2.click
+
+yt-dlp --cookies-from-browser firefox   -f 137+140-drc https://www.youtube.com/watch?v=7dUOWPVqnsE
+yt-dlp --cookies-from-browser firefox   -f 137+140 https://www.youtube.com/watch?v=oN5Xcl08ESk
+
+yt-dlp --cookies-from-browser firefox --list-subs https://www.youtube.com/watch?v=5oYKonYBujg
+
+yt-dlp --cookies-from-browser firefox  -f  299+140 https://www.youtube.com/watch?v=1Ziku4FLka4
+
+
+yt-dlp --cookies-from-browser firefox  -f  140 https://www.youtube.com/watch?v=p-UG8eH_sP8
+
+yt-dlp --cookies-from-browser firefox  -f  30280+30080  https://www.bilibili.com/video/BV1SMUDYnEuY/?spm_id_from=333.337.search-card.all.click&vd_source=b3b529a971c9ca80b21155972d3434e8
+下载b站列表
+yt-dlp --cookies-from-browser firefox -f bestaudio --yes-playlist --embed-chapters https://www.bilibili.com/list/3546564563831207/?spm_id_from=333.1387.0.0&sort_field=pubdate&tid=0&oid=113852318483359&bvid=BV1a4wBedE8z
+
+
+————————  PyPI 包安装  ————————
+
+yt-dlp更新
+使用 PyPI 包安装：python -m pip install --upgrade yt-dlp
+pip install keras -i http://pypi.douban.com/simple --trusted-host pypi.douban.com
+
+python更新
+python.exe -m pip install --upgrade pip
+python -m pip install --upgrade pip
+
+

@@ -1,0 +1,29 @@
+# 忽略特定的日志文件
+startup_debug.log
+
+# 忽略程序自动生成的配置文件
+window_pos.json
+
+# 忽略 Windows 的快捷方式
+*.lnk
+
+# 忽略 Python 运行产生的缓存（建议加上）
+__pycache__/
+*.pyc
+
+
+# 数据库和执行文件（最占用资源的）
+*.sqlite3
+*.exe
+*.bin
+
+# 常见的大型临时文件夹
+venv/
+.venv/
+env/
+__pycache__/
+
+# 如果你还有其他的下载文件夹（比如你下载的视频或图片），也写进去
+# 例如：downloads/
+# 忽略所有的 node_modules 文件夹
+node_modules/

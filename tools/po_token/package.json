@@ -1,0 +1,9 @@
+{
+  "name": "po-token-generator",
+  "version": "1.0.0",
+  "description": "YouTube PO Token generator for JJH Downloader",
+  "main": "generate_token.js",
+  "dependencies": {
+    "youtube-po-token-generator": "^0.3.0"
+  }
+}

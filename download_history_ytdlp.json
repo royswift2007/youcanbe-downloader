@@ -1,0 +1,31 @@
+[
+  {
+    "title": "Turkey in 4K - Incredible Scenes & Hidden Gems",
+    "type": "youtube",
+    "url": "https://www.youtube.com/watch?v=Dux4VbX3AH4",
+    "path": "C:/Users/qinghua/Documents",
+    "archive_subdir": "",
+    "source_type": "manual",
+    "source_name": "手动任务",
+    "time": "2026-03-10 00:22:29",
+    "task_id": "c41348e4",
+    "status": "完成",
+    "video_id": "Dux4VbX3AH4",
+    "playlist_id": "",
+    "channel_id": "",
+    "used_cookies": false,
+    "failure_stage": "",
+    "failure_summary": "",
+    "return_code": null,
+    "profile": {
+      "format": "133+bestaudio[ext=m4a]",
+      "sub_lang": null,
+      "speed_limit": 2,
+      "retries": 3,
+      "custom_filename": "",
+      "preset_key": "manual",
+      "merge_output_format": "mp4",
+      "audio_quality": "192"
+    }
+  }
+]
