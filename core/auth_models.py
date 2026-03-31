@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 import time
+import os
 
 AUTH_LEVEL_INFO = "info"
 AUTH_LEVEL_WARNING = "warning"
@@ -30,7 +31,7 @@ class AuthDiagnostic:
     ok: bool = False
     category: str = AUTH_REASON_NONE
     level: str = AUTH_LEVEL_INFO
-    summary: str = "未检测到认证问题"
+    summary: str = ""
     detail: str = ""
     action_hint: str = ""
     is_auth_related: bool = False
@@ -46,13 +47,19 @@ class CookiesStatus:
     last_success_at: float = 0.0
     last_error_at: float = 0.0
     last_error_category: str = AUTH_REASON_NONE
-    last_message: str = "未检查"
+    last_message: str = ""
     last_action_hint: str = ""
     last_used_cookies: bool = False
     diagnostics: List[AuthDiagnostic] = field(default_factory=list)
 
+    def _refresh_exists(self):
+        if self.file_path:
+            self.exists = os.path.exists(self.file_path)
+        else:
+            self.exists = False
+
     def update_from_diagnostic(self, diagnostic: AuthDiagnostic, used_cookies: bool = False):
-        self.exists = bool(self.file_path)
+        self._refresh_exists()
         self.last_checked_at = time.time()
         self.last_used_cookies = used_cookies
         self.diagnostics.append(diagnostic)
@@ -74,3 +81,13 @@ class CookiesStatus:
             self.status = AUTH_STATUS_ERROR
         else:
             self.status = AUTH_STATUS_WARNING
+
+    def mark_missing(self, message: str, action_hint: str = ""):
+        self._refresh_exists()
+        self.last_checked_at = time.time()
+        self.last_error_at = self.last_checked_at
+        self.status = AUTH_STATUS_MISSING
+        self.last_error_category = AUTH_REASON_LOGIN_REQUIRED
+        self.last_message = message or ""
+        self.last_action_hint = action_hint or ""
+        self.last_used_cookies = False

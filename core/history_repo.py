@@ -7,6 +7,14 @@ import time
 
 logger = logging.getLogger(__name__)
 
+STATUS_SUCCESS = "完成"
+STATUS_FAILED = "失败"
+SOURCE_TYPE_DEFAULT = "manual"
+SOURCE_NAME_DEFAULT = "手动任务"
+SOURCE_PLATFORM_DEFAULT = "youtube"
+URL_TYPE_UNKNOWN = "unknown"
+HISTORY_JSON_LIMIT = 100
+
 
 class YouTubeHistoryRepository:
     def __init__(self, history_file, db_path=None):
@@ -37,6 +45,7 @@ class YouTubeHistoryRepository:
                         channel_id TEXT,
                         url TEXT NOT NULL,
                         task_type TEXT,
+                        url_type TEXT,
                         status TEXT NOT NULL,
                         output_path TEXT,
                         archive_subdir TEXT,
@@ -47,6 +56,7 @@ class YouTubeHistoryRepository:
                         used_cookies INTEGER DEFAULT 0,
                         failure_stage TEXT,
                         failure_summary TEXT,
+                        failure_detail TEXT,
                         return_code INTEGER,
                         created_at TEXT NOT NULL,
                         source TEXT DEFAULT 'youtube'
@@ -63,6 +73,10 @@ class YouTubeHistoryRepository:
                     conn.execute("ALTER TABLE youtube_download_history ADD COLUMN source_type TEXT")
                 if "source_name" not in existing_columns:
                     conn.execute("ALTER TABLE youtube_download_history ADD COLUMN source_name TEXT")
+                if "url_type" not in existing_columns:
+                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN url_type TEXT")
+                if "failure_detail" not in existing_columns:
+                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN failure_detail TEXT")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_youtube_history_created_at ON youtube_download_history(created_at DESC)"
                 )
@@ -96,18 +110,21 @@ class YouTubeHistoryRepository:
             return url.split("list=", 1)[1].split("&", 1)[0].strip()
         return ""
 
-    def _build_history_item(self, task, status="完成", failure_stage="", failure_summary="", return_code=None):
+    def _build_history_item(self, task, status=STATUS_SUCCESS, failure_stage="", failure_summary="", return_code=None):
         display_title = task.final_title if task.final_title else task.get_display_name()
         archive_subdir = getattr(task, "archive_subdir", "")
         archive_output_path = getattr(task, "archive_output_path", "") or getattr(task, "save_path", "")
+        failure_detail = getattr(task, "latest_error_detail", "") if failure_summary else ""
         return {
             "title": display_title,
-            "type": task.task_type,
+            "type": getattr(task, "task_type", "youtube"),
             "url": task.url,
             "path": archive_output_path,
             "archive_subdir": archive_subdir,
-            "source_type": getattr(task, "source_type", "manual"),
-            "source_name": getattr(task, "source_name", "手动任务"),
+            "source_type": getattr(task, "source_type", SOURCE_TYPE_DEFAULT),
+            "source_name": getattr(task, "source_name", SOURCE_NAME_DEFAULT),
+            "source_platform": getattr(task, "source_platform", SOURCE_PLATFORM_DEFAULT),
+            "url_type": getattr(task, "url_type", URL_TYPE_UNKNOWN),
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "task_id": task.id,
             "status": status,
@@ -117,6 +134,7 @@ class YouTubeHistoryRepository:
             "used_cookies": bool(getattr(task, "needs_cookies", False)),
             "failure_stage": failure_stage,
             "failure_summary": failure_summary,
+            "failure_detail": failure_detail,
             "return_code": return_code,
             "profile": {
                 "format": task.profile.format,
@@ -139,10 +157,10 @@ class YouTubeHistoryRepository:
                     conn.execute(
                         """
                         INSERT INTO youtube_download_history (
-                            task_id, video_id, playlist_id, channel_id, url, task_type, status,
+                            task_id, video_id, playlist_id, channel_id, url, task_type, url_type, status,
                             output_path, archive_subdir, source_type, source_name, format, final_title, used_cookies,
-                            failure_stage, failure_summary, return_code, created_at, source
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            failure_stage, failure_summary, failure_detail, return_code, created_at, source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             item.get("task_id", ""),
@@ -150,20 +168,22 @@ class YouTubeHistoryRepository:
                             item.get("playlist_id", ""),
                             item.get("channel_id", ""),
                             item.get("url", ""),
-                            item.get("type", "youtube"),
-                            item.get("status", "完成"),
+                            item.get("type", SOURCE_PLATFORM_DEFAULT),
+                            item.get("url_type", URL_TYPE_UNKNOWN),
+                            item.get("status", STATUS_SUCCESS),
                             item.get("path", ""),
                             item.get("archive_subdir", ""),
-                            item.get("source_type", "manual"),
-                            item.get("source_name", "手动任务"),
+                            item.get("source_type", SOURCE_TYPE_DEFAULT),
+                            item.get("source_name", SOURCE_NAME_DEFAULT),
                             item.get("profile", {}).get("format", ""),
                             item.get("title", ""),
                             1 if item.get("used_cookies") else 0,
                             item.get("failure_stage", ""),
                             item.get("failure_summary", ""),
+                            item.get("failure_detail", ""),
                             item.get("return_code"),
                             item.get("time", ""),
-                            "youtube",
+                            item.get("source_platform", SOURCE_PLATFORM_DEFAULT),
                         ),
                     )
                     conn.commit()
@@ -223,6 +243,8 @@ class YouTubeHistoryRepository:
             "失败阶段": "failure_stage",
             "失败摘要": "failure_summary",
             "返回码": "return_code",
+            "来源平台": "source_platform",
+            "链接类型": "url_type",
         }
 
         migrated = False
@@ -240,12 +262,14 @@ class YouTubeHistoryRepository:
 
         normalized = {
             "title": merged.get("title") or merged.get("final_title") or merged.get("name") or "",
-            "type": merged.get("type") or merged.get("task_type") or "youtube",
+            "type": merged.get("type") or merged.get("task_type") or SOURCE_PLATFORM_DEFAULT,
             "url": merged.get("url") or "",
             "path": merged.get("path") or merged.get("output_path") or "",
             "archive_subdir": merged.get("archive_subdir") or "",
-            "source_type": merged.get("source_type") or "manual",
-            "source_name": merged.get("source_name") or "手动任务",
+            "source_type": merged.get("source_type") or SOURCE_TYPE_DEFAULT,
+            "source_name": merged.get("source_name") or SOURCE_NAME_DEFAULT,
+            "source_platform": merged.get("source_platform") or SOURCE_PLATFORM_DEFAULT,
+            "url_type": merged.get("url_type") or URL_TYPE_UNKNOWN,
             "time": merged.get("time") or merged.get("created_at") or "",
             "task_id": merged.get("task_id") or "",
             "status": merged.get("status") or "",
@@ -301,7 +325,7 @@ class YouTubeHistoryRepository:
         with self._json_lock:
             history_data = self._load_json_history()
             history_data.insert(0, history_item)
-            self._write_json_history(history_data[:100])
+            self._write_json_history(history_data[:HISTORY_JSON_LIMIT])
 
     def load(self):
         if self.db_available:
@@ -312,7 +336,8 @@ class YouTubeHistoryRepository:
                         """
                         SELECT final_title, task_type, url, output_path, created_at, task_id, status,
                                video_id, playlist_id, channel_id, used_cookies,
-                               failure_stage, failure_summary, return_code, format
+                               failure_stage, failure_summary, return_code, format,
+                               source_type, source_name, source, url_type
                         FROM youtube_download_history
                         ORDER BY datetime(created_at) DESC, id DESC
                         LIMIT 200
@@ -322,9 +347,13 @@ class YouTubeHistoryRepository:
                 for row in rows:
                     result.append({
                         "title": row["final_title"] or "",
-                        "type": row["task_type"] or "youtube",
+                        "type": row["task_type"] or SOURCE_PLATFORM_DEFAULT,
                         "url": row["url"] or "",
                         "path": row["output_path"] or "",
+                        "source_type": row["source_type"] or SOURCE_TYPE_DEFAULT,
+                        "source_name": row["source_name"] or SOURCE_NAME_DEFAULT,
+                        "source_platform": row["source"] or SOURCE_PLATFORM_DEFAULT,
+                        "url_type": row["url_type"] or URL_TYPE_UNKNOWN,
                         "time": row["created_at"] or "",
                         "task_id": row["task_id"] or "",
                         "status": row["status"] or "",
@@ -345,14 +374,16 @@ class YouTubeHistoryRepository:
                 if "database is locked" not in message and "database table is locked" not in message:
                     self.db_available = False
                     self.init_error = str(exc)
+                    return self._load_json_history()
             except Exception as exc:
                 self.db_available = False
                 self.init_error = str(exc)
+                return self._load_json_history()
 
         return self._load_json_history()
 
     def save_task(self, task):
-        history_item = self._build_history_item(task, status="完成")
+        history_item = self._build_history_item(task, status=STATUS_SUCCESS)
         db_saved = self._insert_db_record(history_item)
         self._save_json_item(history_item)
         return db_saved
@@ -360,7 +391,7 @@ class YouTubeHistoryRepository:
     def save_failed_task(self, task, failure_stage="download", failure_summary="", return_code=None):
         history_item = self._build_history_item(
             task,
-            status="失败",
+            status=STATUS_FAILED,
             failure_stage=failure_stage,
             failure_summary=failure_summary,
             return_code=return_code,
@@ -377,14 +408,14 @@ class YouTubeHistoryRepository:
                 if video_id:
                     row = conn.execute(
                         "SELECT 1 FROM youtube_download_history WHERE status = ? AND video_id = ? LIMIT 1",
-                        ("完成", video_id),
+                        (STATUS_SUCCESS, video_id),
                     ).fetchone()
                     if row:
                         return True
                 if url:
                     row = conn.execute(
                         "SELECT 1 FROM youtube_download_history WHERE status = ? AND url = ? LIMIT 1",
-                        ("完成", self._normalize_url(url)),
+                        (STATUS_SUCCESS, self._normalize_url(url)),
                     ).fetchone()
                     if row:
                         return True

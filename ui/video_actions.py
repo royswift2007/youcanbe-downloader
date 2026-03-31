@@ -5,6 +5,17 @@ import time
 from ui.input_validators import sync_output_format_by_preset, validate_format_fetch_request
 
 
+def _t(frame, key, fallback=""):
+    app = getattr(frame, "app", None)
+    getter = getattr(app, "get_text", None)
+    if callable(getter):
+        try:
+            return getter(key, fallback)
+        except TypeError:
+            return getter(key)
+    return fallback or key
+
+
 def _sort_quality_key(item):
     resolution = item.get("resolution") or ""
     height = 0
@@ -28,26 +39,44 @@ def _update_format_ui(frame, formats, video_info):
     frame.all_formats = list(formats)
     _update_video_info_ui(frame, video_info)
     refresh_format_view(frame)
-    title = video_info.get("title", "未知标题")
+    if getattr(frame, "format_table", None):
+        frame.format_table.selection_remove(frame.format_table.selection())
+    title = video_info.get("title", _t(frame, "format_title_unknown", "未知标题"))
     time_str = time.strftime("%H:%M:%S")
-    frame.manager.log(f"获取到 {len(formats)} 个格式 | 时间: {time_str} | 标题: {title}")
+    frame.manager.log(_t(frame, "format_fetch_success", "获取到 {count} 个格式 | 时间: {time} | 标题: {title}").format(
+        count=len(formats),
+        time=time_str,
+        title=title,
+    ))
 
 
 def _handle_format_fetch_result(frame, format_result):
     if format_result["used_cookies"]:
         frame.format_fetch_used_cookies = True
-        frame.manager.log("使用cookies成功获取格式")
+        frame.manager.log(_t(frame, "format_fetch_used_cookies", "已使用 cookies 获取格式"))
     elif not format_result["ok"] and os.path.exists(frame._cookies_file_path):
-        frame.manager.log("获取格式失败，请查看错误摘要与诊断信息", "WARN")
+        frame.manager.log(_t(frame, "format_fetch_failed_hint", "格式获取失败，请检查错误摘要与诊断"), "WARN")
+
+    diagnostic = format_result.get("auth_diagnostic")
+    if diagnostic:
+        frame.app.latest_auth_diagnostic = diagnostic
+        cookies_status = getattr(frame.app, "latest_cookies_status", None)
+        if cookies_status is not None:
+            try:
+                cookies_status.update_from_diagnostic(diagnostic, used_cookies=format_result.get("used_cookies", False))
+            except Exception:
+                pass
+        if hasattr(frame.app, 'top_bar'):
+            frame.app.root.after(0, frame.app.top_bar.refresh_auth_status)
 
     if format_result["cookies_error"]:
-        frame.manager.log("[错误]\tCookies可能已失效!", "ERROR")
-        frame.manager.log("[提示]\t建议: 重新导出cookies文件 (www.youtube.com_cookies.txt)", "ERROR")
+        frame.manager.log(_t(frame, "format_cookies_error", "[错误]\tCookies 可能失效"), "ERROR")
+        frame.manager.log(_t(frame, "format_cookies_hint", "[提示]\t建议启用 Browser Cookies 或重新导出 cookies 文件"), "ERROR")
         if hasattr(frame.app, 'notify_cookies_error'):
-            frame.app.root.after(0, frame.app.notify_cookies_error)
+            frame.app.root.after(0, lambda diag=diagnostic: frame.app.notify_cookies_error(diag))
 
     if not format_result["ok"]:
-        raise RuntimeError(f"获取格式失败: {format_result['error_output']}")
+        raise RuntimeError(_t(frame, "format_fetch_failed", "格式获取失败: {error}").format(error=format_result['error_output']))
 
     formats = format_result["formats"]
     video_info = format_result.get("video_info", {})
@@ -57,7 +86,7 @@ def _handle_format_fetch_result(frame, format_result):
 def fetch_formats_async(frame):
     """在后台获取 YouTube 可用格式，并在主线程中回填 UI。"""
     if getattr(frame, "_format_fetch_in_progress", False):
-        frame.manager.log("⚠️\t格式获取正在进行中，请勿重复点击", "WARN")
+        frame.manager.log(_t(frame, "format_fetch_in_progress", "格式获取进行中，请稍候"), "WARN")
         return
 
     url = validate_format_fetch_request(frame, frame.url_entry.get("1.0", "end-1c"))
@@ -66,7 +95,11 @@ def fetch_formats_async(frame):
 
     sync_output_format_by_preset(frame)
     time_str = time.strftime("%H:%M:%S")
-    frame.manager.log(f"正在获取 YouTube 可用格式... | 时间: {time_str} | 链接: {url}")
+    frame.manager.log(_t(frame, "format_fetch_start", "开始获取格式 | 时间: {time} | URL: {url}").format(time=time_str, url=url))
+    frame.format_fetch_used_cookies = False
+    frame._format_fetch_in_progress = True
+    if getattr(frame, "fetch_formats_button", None):
+        frame.fetch_formats_button.configure(state="disabled")
     frame.format_fetch_used_cookies = False
     frame._format_fetch_in_progress = True
     if getattr(frame, "fetch_formats_button", None):
@@ -80,13 +113,16 @@ def fetch_formats_async(frame):
     def run_fetch():
         try:
             time_str2 = time.strftime("%H:%M:%S")
-            frame.manager.log(f"尝试获取格式... | 时间: {time_str2} | 链接: {url}")
-            format_result = frame.app.metadata_service.fetch_formats(url)
+            frame.manager.log(_t(frame, "format_fetch_try", "尝试获取格式 | 时间: {time} | URL: {url}").format(time=time_str2, url=url))
+            use_po_token = getattr(frame, "use_po_token_var", None).get() if getattr(frame, "use_po_token_var", None) else False
+            format_result = frame.app.metadata_service.fetch_formats(url, use_po_token=use_po_token)
             _handle_format_fetch_result(frame, format_result)
         except Exception as exc:
             err_msg = str(exc)
             time_str_err = time.strftime("%H:%M:%S")
-            frame.app.root.after(0, lambda msg=err_msg, t=time_str_err: frame.manager.log(f"获取格式失败: {msg} | 时间: {t}"))
+            frame.app.root.after(0, lambda msg=err_msg, t=time_str_err: frame.manager.log(
+                _t(frame, "format_fetch_fail_log", "格式获取失败: {error} | 时间: {time}").format(error=msg, time=t)
+            ))
         finally:
             frame.app.root.after(0, finish_fetch)
 
@@ -96,7 +132,6 @@ def fetch_formats_async(frame):
 def _sort_size_key(item):
     filesize = item.get("filesize_bytes") or 0
     return (filesize, *_sort_quality_key(item)[:3])
-
 
 def _apply_format_filters(frame, formats):
     filtered = list(formats)
@@ -132,62 +167,96 @@ def _format_duration(seconds):
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _format_views(view_count):
+def _format_views(frame, view_count):
     count = int(view_count or 0)
-    return f"{count:,}" if count else "未知"
+    if count:
+        return f"{count:,}"
+    return _t(frame, "format_view_unknown", "未知")
 
 
-def _build_format_label(item):
+def _build_format_label(frame, item):
     tags = []
     if item["is_video_only"]:
-        tags.append("仅视频")
+        tags.append(_t(frame, "format_tag_video_only", "仅视频"))
     elif item["is_audio_only"]:
-        tags.append("仅音频")
+        tags.append(_t(frame, "format_tag_audio_only", "仅音频"))
     else:
-        tags.append("含音频")
+        tags.append(_t(frame, "format_tag_with_audio", "含音频"))
     if item["needs_merge"]:
-        tags.append("需合并")
+        tags.append(_t(frame, "format_tag_needs_merge", "需合并"))
     tags.append(item["dynamic_range"])
     if item["fps"]:
-        tags.append(f"{item['fps']}fps")
+        tags.append(_t(frame, "format_tag_fps", "{fps}fps").format(fps=item['fps']))
     return f"{item['format_id']} | {item['resolution']} | {item['ext']} | {item['filesize']} | {' / '.join(tags)}"
 
 
 def _update_video_info_ui(frame, video_info):
-    frame.video_title_var.set(video_info.get("title") or "未解析")
-    
+    frame.video_title_var.set(video_info.get("title") or _t(frame, "video_info_unparsed", "未解析"))
+
     # 合并所有元数据到一行
     meta_parts = [
-        f"ID: {video_info.get('video_id') or '-'}",
-        f"频道: {video_info.get('channel') or '-'}",
-        f"时长: {_format_duration(video_info.get('duration'))}",
-        f"观看: {_format_views(video_info.get('view_count'))}",
-        f"上传: {video_info.get('upload_date') or '-'}",
-        f"语言: {video_info.get('language') or '未知'}"
+        f"{_t(frame, 'video_meta_id', 'ID')}: {video_info.get('video_id') or '-'}",
+        f"{_t(frame, 'video_meta_channel', '频道')}: {video_info.get('channel') or '-'}",
+        f"{_t(frame, 'video_meta_duration', '时长')}: {_format_duration(video_info.get('duration'))}",
+        f"{_t(frame, 'video_meta_views', '观看')}: {_format_views(frame, video_info.get('view_count'))}",
+        f"{_t(frame, 'video_meta_upload', '上传')}: {video_info.get('upload_date') or '-'}",
+        f"{_t(frame, 'video_meta_lang', '语言')}: {video_info.get('language') or _t(frame, 'video_meta_lang_unknown', '未知')}"
     ]
-    
+
     # 补充 Shorts 和 直播状态
     if video_info.get('is_shorts'):
-        meta_parts.append("Shorts: 是")
+        meta_parts.append(_t(frame, "video_meta_shorts_yes", "Shorts: 是"))
     if video_info.get('was_live'):
-        meta_parts.append("直播回放: 是")
-        
+        meta_parts.append(_t(frame, "video_meta_live_yes", "直播回放: 是"))
+
     frame.video_meta_var.set(" | ".join(meta_parts))
 
 
 def _populate_format_list(frame, formats):
     frame.format_rows = {}
+    if getattr(frame, "format_table", None):
+        for child in frame.format_table.get_children():
+            frame.format_table.delete(child)
+
     for index, item in enumerate(formats):
-        frame.format_rows[str(index)] = item
+        row_id = str(index)
+        label = _build_format_label(frame, item)
+        entry = dict(item)
+        entry["label"] = label
+        frame.format_rows[row_id] = entry
+        if getattr(frame, "format_table", None):
+            frame.format_table.insert(
+                "",
+                "end",
+                iid=row_id,
+                values=(
+                    entry.get("format_id", ""),
+                    entry.get("ext", ""),
+                    entry.get("resolution", ""),
+                    entry.get("fps", ""),
+                    entry.get("vcodec", ""),
+                    entry.get("acodec", ""),
+                    entry.get("protocol", ""),
+                    entry.get("filesize", ""),
+                    entry.get("dynamic_range", ""),
+                    entry.get("note", ""),
+                ),
+            )
 
     if formats:
         selected_item = formats[0]
-        selected_label = _build_format_label(selected_item)
+        selected_label = _build_format_label(frame, selected_item)
         frame.selected_format_id_var.set(selected_item["format_id"])
         frame.format_var_combo.set(selected_label)
+        if getattr(frame, "selected_format_label_var", None):
+            frame.selected_format_label_var.set(selected_label)
+        if getattr(frame, "format_table", None):
+            frame.format_table.selection_set("0")
     else:
         frame.selected_format_id_var.set("")
         frame.format_var_combo.set("")
+        if getattr(frame, "selected_format_label_var", None):
+            frame.selected_format_label_var.set(_t(frame, "single_selected_format_none", "未选择"))
 
 
 def refresh_format_view(frame):
@@ -195,19 +264,23 @@ def refresh_format_view(frame):
     filtered_formats = _apply_format_filters(frame, all_formats)
     frame.current_formats = filtered_formats
     _populate_format_list(frame, filtered_formats)
-    frame.format_combo.configure(values=[_build_format_label(item) for item in filtered_formats])
 
     if not all_formats:
-        frame.filter_summary_var.set("尚未获取格式，请先点击“获取分辨率/格式”")
+        frame.filter_summary_var.set(_t(frame, "format_filter_summary_need_fetch", "尚未获取格式，请先点击“获取分辨率/格式”"))
     elif filtered_formats:
-        frame.filter_summary_var.set(f"已显示 {len(filtered_formats)} / {len(all_formats)} 个格式")
+        frame.filter_summary_var.set(_t(frame, "format_filter_summary_some", "已显示 {shown} / {total} 个格式").format(
+            shown=len(filtered_formats),
+            total=len(all_formats),
+        ))
     else:
-        frame.filter_summary_var.set(f"筛选后无可用格式（原始 {len(all_formats)} 个）")
-        frame.manager.log("⚠️ 当前筛选条件下没有可用格式，请放宽筛选条件后重试", "WARNING")
+        frame.filter_summary_var.set(_t(frame, "format_filter_summary_none", "筛选后无可用格式（原始 {total} 个）").format(total=len(all_formats)))
+        frame.manager.log(_t(frame, "format_filter_summary_none_warn", "⚠️ 无匹配格式，请放宽筛选条件"), "WARNING")
 
     if not filtered_formats:
         frame.selected_format_id_var.set("")
         frame.format_var_combo.set("")
+        if getattr(frame, "selected_format_label_var", None):
+            frame.selected_format_label_var.set(_t(frame, "single_selected_format_none", "未选择"))
         if getattr(frame, 'format_list_var', None):
             frame.format_list_var.set("")
 

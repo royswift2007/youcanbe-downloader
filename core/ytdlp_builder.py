@@ -1,6 +1,7 @@
 import os
-import shlex
 
+from core.advanced_args_policy import parse_and_validate_advanced_args
+from core.cookies_args import build_cookies_args
 from core.youtube_models import AUDIO_FMT
 from core.po_token_manager import get_manager as _get_pot_manager
 
@@ -15,12 +16,17 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
 
     cmd = [yt_dlp_path]
 
-    cookies_mode = getattr(task.profile, "cookies_mode", "file") or "file"
-    cookies_browser = getattr(task.profile, "cookies_browser", "") or ""
-    if cookies_mode == "browser" and cookies_browser:
-        cmd.extend(["--cookies-from-browser", cookies_browser])
-    elif task.needs_cookies and os.path.exists(cookies_file_path):
-        cmd.extend(["--cookies", cookies_file_path])
+    socket_timeout = getattr(task.profile, "socket_timeout", 0) or 0
+    if socket_timeout > 0:
+        cmd.extend(["--socket-timeout", str(socket_timeout)])
+
+    cookies_mode = (getattr(task.profile, "cookies_mode", "file") or "file").strip().lower()
+    cookies_browser = (getattr(task.profile, "cookies_browser", "") or "").strip().lower()
+    cookies_args = build_cookies_args(cookies_mode, cookies_browser, cookies_file_path)
+    if cookies_mode == "browser":
+        cmd.extend(cookies_args)
+    elif task.needs_cookies and cookies_args:
+        cmd.extend(cookies_args)
 
     fmt = task.profile.format
     sub_lang = task.profile.sub_lang
@@ -45,6 +51,8 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
     sponsorblock_categories = getattr(task.profile, "sponsorblock_categories", "") or ""
     proxy_url = getattr(task.profile, "proxy_url", "") or ""
     advanced_args = getattr(task.profile, "advanced_args", "") or ""
+    preset_key = getattr(task.profile, "preset_key", "") or ""
+    is_audio_download = preset_key == "audio_only" or fmt == AUDIO_FMT
 
     if fmt:
         cmd.extend(["-f", fmt])
@@ -55,15 +63,14 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
         "--newline"
     ])
 
-    if fmt == AUDIO_FMT:
+    if is_audio_download:
         audio_format = merge_output_format if merge_output_format in {"m4a", "mp3", "opus", "wav", "flac"} else "m4a"
-        if audio_format == "m4a":
-            cmd.extend(["--merge-output-format", "m4a"])
-        else:
-            cmd.extend(["-x", "--audio-format", audio_format, "--audio-quality", audio_quality])
+        cmd.extend(["-x", "--audio-format", audio_format, "--audio-quality", audio_quality])
         if keep_video:
             cmd.append("--keep-video")
     else:
+        if merge_output_format == "webm" and h264_compat:
+            raise ValueError("webm output does not support H.264 compatibility transcoding")
         cmd.extend(["--merge-output-format", merge_output_format])
         if merge_output_format == "mkv":
             cmd.append("--remux-video")
@@ -73,6 +80,9 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
         cmd.append("--embed-metadata")
     if embed_thumbnail:
         cmd.append("--embed-thumbnail")
+        # mkv + embedded subtitles + embedded thumbnail is unstable on some ffmpeg/muxer stacks.
+        if merge_output_format == "mkv" and embed_subs:
+            cmd.extend(["--convert-thumbnails", "png"])
     if write_thumbnail:
         cmd.append("--write-thumbnail")
     if write_info_json:
@@ -82,7 +92,7 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
     if write_chapters:
         cmd.append("--embed-chapters")
 
-    if h264_compat and fmt != AUDIO_FMT:
+    if h264_compat and not is_audio_download:
         cmd.extend(["--recode-video", "mp4", "--postprocessor-args", "ffmpeg:-c:v libx264 -c:a aac"])
 
     if speed_limit > 0:
@@ -139,10 +149,10 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
         cmd.extend(["--proxy", proxy_url])
 
     if advanced_args:
-        try:
-            cmd.extend(shlex.split(advanced_args))
-        except ValueError:
-            cmd.extend(advanced_args.split())
+        advanced_tokens, error_message = parse_and_validate_advanced_args(advanced_args)
+        if error_message:
+            raise ValueError(f"高级参数无效: {error_message}")
+        cmd.extend(advanced_tokens)
 
     # PO Token 注入（方案 B）
     use_po_token = bool(getattr(task.profile, "use_po_token", False))

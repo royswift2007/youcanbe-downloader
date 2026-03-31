@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
+import itertools
 import os
 import re
 import time
-import uuid
+from urllib.parse import urlparse
 
 from core.auth_models import AuthDiagnostic
 
@@ -28,6 +29,15 @@ BATCH_SOURCE_PLAYLIST = "playlist"
 BATCH_SOURCE_CHANNEL = "channel"
 BATCH_SOURCE_UPLOADS = "uploads"
 BATCH_SOURCE_UNKNOWN = "unknown"
+
+URL_TYPE_YOUTUBE = "youtube"
+URL_TYPE_BILIBILI = "bilibili"
+URL_TYPE_VIMEO = "vimeo"
+URL_TYPE_SOUNDCLOUD = "soundcloud"
+URL_TYPE_UNKNOWN = "unknown"
+
+TASK_MODE_YOUTUBE = "youtube"
+TASK_MODE_GENERIC = "generic"
 
 DOWNLOAD_PRESET_LABELS = {
     "best_quality": "最佳画质",
@@ -90,6 +100,9 @@ class YouTubeDownloadProfile:
     advanced_args: str = ""
     cookies_mode: str = "file"
     cookies_browser: str = ""
+    timeout_idle: int = 300
+    timeout_no_progress: int = 600
+    socket_timeout: int = 15
 
 
 @dataclass
@@ -165,6 +178,43 @@ class YouTubeBatchParseResult:
         return [entry for entry in self.entries if entry.available and entry.url]
 
 
+def normalize_url(url):
+    return (url or "").strip()
+
+
+def _extract_host(url):
+    try:
+        parsed = urlparse((url or "").strip())
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").strip().lower().rstrip(".")
+    if not host:
+        return ""
+    if "@" in host:
+        host = host.split("@", 1)[-1]
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    return host
+
+
+def detect_url_type(url):
+    normalized = normalize_url(url)
+    if not normalized:
+        return URL_TYPE_UNKNOWN
+    host = _extract_host(normalized)
+    if not host:
+        return URL_TYPE_UNKNOWN
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+        return URL_TYPE_YOUTUBE
+    if host in {"bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}:
+        return URL_TYPE_BILIBILI
+    if host in {"vimeo.com", "www.vimeo.com"}:
+        return URL_TYPE_VIMEO
+    if host in {"soundcloud.com", "www.soundcloud.com"}:
+        return URL_TYPE_SOUNDCLOUD
+    return URL_TYPE_UNKNOWN
+
+
 def sanitize_archive_segment(value, fallback="未命名"):
     text = (value or "").strip()
     if not text:
@@ -176,13 +226,23 @@ def sanitize_archive_segment(value, fallback="未命名"):
     return text[:80]
 
 
+_TASK_ID_COUNTER = itertools.count(1)
+
+
+def generate_task_id():
+    task_no = ((next(_TASK_ID_COUNTER) - 1) % 999) + 1
+    return f"{task_no:03d}"
+
+
 @dataclass
 class YouTubeTaskRecord:
     url: str
     save_path: str
     profile: YouTubeDownloadProfile
-    task_type: str = "youtube"
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    task_type: str = TASK_MODE_YOUTUBE
+    source_platform: str = URL_TYPE_YOUTUBE
+    url_type: str = URL_TYPE_YOUTUBE
+    id: str = field(default_factory=generate_task_id)
     status: str = TASK_STATUS_WAITING
     progress: str = "0%"
     speed: str = "0 M/s"
@@ -200,6 +260,7 @@ class YouTubeTaskRecord:
     archive_subdir: str = ""
     archive_output_path: str = ""
     latest_error_summary: str = ""
+    latest_error_detail: str = ""
     add_time: float = field(default_factory=lambda: time.time())
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -209,8 +270,20 @@ class YouTubeTaskRecord:
             return self.final_title
 
         preset_key = getattr(self.profile, "preset_key", "manual")
+        preset_labels_en = {
+            "best_quality": "Best Quality",
+            "best_compat": "Best Compat",
+            "max_1080p": "Max 1080p",
+            "max_4k": "Max 4K",
+            "audio_only": "Audio Only",
+            "min_size": "Min Size",
+            "keep_original": "Keep Original Codec",
+            "hdr_priority": "HDR Priority",
+            "high_fps": "High FPS Priority",
+            "manual": "Manual Format",
+        }
         if preset_key in DOWNLOAD_PRESET_LABELS:
-            return f"YouTube-{DOWNLOAD_PRESET_LABELS[preset_key]}"
+            return f"YouTube-{preset_labels_en.get(preset_key, DOWNLOAD_PRESET_LABELS[preset_key])}"
 
         fmt = self.profile.format
         if not fmt:

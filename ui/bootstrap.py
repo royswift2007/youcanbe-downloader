@@ -55,6 +55,16 @@ def setup_styles(ui_colors, font_family, font_size_normal):
 
     style.configure("Card.TFrame", background=ui_colors["bg_secondary"], relief="flat", borderwidth=0)
     style.configure("Card.TLabel", background=ui_colors["bg_secondary"], borderwidth=0)
+    
+    style.configure(
+        "CardHeader.TLabel",
+        background=ui_colors["bg_secondary"],
+        foreground=ui_colors["primary"],
+        font=(font_family, font_size_normal, 'bold'),
+        borderwidth=0,
+    )
+
+    style.configure("Divider.TFrame", background="#f0f2f5", height=1)
 
     style.configure(
         "TButton",
@@ -106,6 +116,18 @@ def setup_styles(ui_colors, font_family, font_size_normal):
     )
 
     style.configure(
+        "Tiny.TButton",
+        padding=(2, 0),
+        font=(font_family, font_size_normal - 2),
+        background=ui_colors["bg_secondary"],
+    )
+    style.map(
+        "Tiny.TButton",
+        background=[('active', '#e6f7ff'), ('pressed', '#bae7ff')],
+        foreground=[('active', ui_colors["primary"])],
+    )
+
+    style.configure(
         "Info.Small.TButton",
         padding=(12, 8),
         font=(font_family, font_size_normal, 'bold'),
@@ -150,6 +172,28 @@ def setup_styles(ui_colors, font_family, font_size_normal):
     )
 
     style.configure(
+        "TSpinbox",
+        padding=5,
+        arrowcolor="#999999",
+        arrowsize=10,
+        bordercolor="#e5e5e5",
+        lightcolor="#e5e5e5",
+        darkcolor="#e5e5e5",
+        relief="solid",
+        borderwidth=1,
+        fieldbackground="white",
+    )
+    style.map(
+        "TSpinbox",
+        bordercolor=[('focus', '#e5e5e5')],
+        lightcolor=[('focus', '#e5e5e5')],
+        darkcolor=[('focus', '#e5e5e5')],
+        relief=[('focus', 'solid')],
+        borderwidth=[('focus', 1)],
+    )
+
+
+    style.configure(
         "TCombobox",
         padding=5,
         relief="solid",
@@ -167,7 +211,8 @@ def setup_styles(ui_colors, font_family, font_size_normal):
 
     style.configure(
         "TSpinbox",
-        padding=5,
+        padding=(8, 6),
+        arrowsize=18,
         relief="solid",
         borderwidth=1,
         bordercolor="#e5e5e5",
@@ -187,6 +232,7 @@ def setup_styles(ui_colors, font_family, font_size_normal):
         background="white",
         fieldbackground="white",
         foreground=ui_colors["text_primary"],
+        font=(font_family, font_size_normal),
         rowheight=28,
         borderwidth=1,
         bordercolor=ui_colors["border"],
@@ -200,6 +246,7 @@ def setup_styles(ui_colors, font_family, font_size_normal):
         "Treeview",
         background=[('selected', '#e3f2fd')],
         foreground=[('selected', ui_colors["text_primary"])],
+        font=[('selected', (font_family, font_size_normal, 'bold'))],
     )
     style.configure(
         "Treeview.Heading",

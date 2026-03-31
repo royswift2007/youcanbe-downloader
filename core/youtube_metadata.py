@@ -2,6 +2,8 @@ import json
 import os
 import re
 import subprocess
+from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from core.auth_models import (
     AUTH_LEVEL_ERROR,
@@ -20,6 +22,8 @@ from core.auth_models import (
     AUTH_REASON_UNKNOWN,
     AuthDiagnostic,
 )
+from core.cookies_args import build_cookies_args
+from core.po_token_manager import get_manager as get_pot_manager
 from core.youtube_models import (
     BATCH_SOURCE_CHANNEL,
     BATCH_SOURCE_PLAYLIST,
@@ -31,10 +35,54 @@ from core.youtube_models import (
 )
 
 
+def _parse_and_validate_url(url, youtube_only=False):
+    normalized = (url or "").strip()
+    if not normalized:
+        return "", "empty"
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        return "", "parse"
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        return "", "scheme"
+    host = (parsed.netloc or "").strip().lower().rstrip(".")
+    if not host:
+        return "", "host"
+    if "@" in host:
+        host = host.split("@", 1)[-1]
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    if not host:
+        return "", "host"
+    if youtube_only:
+        allowed_hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+        if host not in allowed_hosts:
+            return "", "domain"
+    return normalized, ""
+
+
+def _build_cookies_args(cookies_mode, cookies_browser, cookies_path):
+    return build_cookies_args(cookies_mode, cookies_browser, cookies_path)
+
+
+def _build_invalid_url_result(message, used_cookies=False):
+    diagnostic = detect_auth_diagnostic(message)
+    return {
+        "ok": False,
+        "formats": [],
+        "video_info": {},
+        "used_cookies": used_cookies,
+        "cookies_error": (not diagnostic.ok) and diagnostic.is_auth_related,
+        "auth_diagnostic": diagnostic,
+        "error_output": message[:200],
+    }
+
+
 def detect_auth_diagnostic(error_output):
     raw_output = (error_output or "").strip()
     if not raw_output:
-        return AuthDiagnostic(ok=True, summary="未检测到认证问题")
+        return AuthDiagnostic(ok=True, summary="auth_summary_ok")
 
     error_lower = raw_output.lower()
     rules = [
@@ -42,32 +90,32 @@ def detect_auth_diagnostic(error_output):
             AUTH_REASON_AGE_RESTRICTED,
             ["confirm your age", "content is age-restricted", "age-restricted"],
             "ERROR",
-            "检测到年龄限制内容",
-            "请使用已登录且具备观看权限的 cookies，并重新导出 [`www.youtube.com_cookies.txt`](www.youtube.com_cookies.txt)。",
+            "auth_summary_age_restricted",
+            "建议优先启用 Browser Cookies（Chrome/Edge/Firefox），或重新导出已登录账号的 cookies 文件后重试。",
             True,
         ),
         (
             AUTH_REASON_PRIVATE_VIDEO,
             ["video is private", "private video"],
             "ERROR",
-            "检测到私有视频或不可公开访问内容",
-            "请确认当前账号具备访问权限，并重新导出有效 cookies。",
+            "auth_summary_private_video",
+            "请确认当前账号具备访问权限，并使用 Browser Cookies 或更新 cookies 文件。",
             True,
         ),
         (
             AUTH_REASON_MEMBERS_ONLY,
             ["members-only", "join this channel"],
             "ERROR",
-            "检测到会员专属内容",
-            "请确认当前 cookies 对应账号具备会员权限。",
+            "auth_summary_members_only",
+            "请确认当前账号具备会员权限，并使用 Browser Cookies 或更新 cookies 文件。",
             True,
         ),
         (
             AUTH_REASON_PAYMENT_REQUIRED,
             ["requires payment", "video requires purchase"],
             "ERROR",
-            "检测到付费内容",
-            "请确认当前账号已购买对应内容。",
+            "auth_summary_payment_required",
+            "请确认当前账号已购买对应内容，并使用已登录账号的 cookies。",
             True,
         ),
         (
@@ -82,8 +130,8 @@ def detect_auth_diagnostic(error_output):
                 "login to view this video",
             ],
             "ERROR",
-            "检测到需要登录后才能访问",
-            "请重新导出已登录账号的 cookies 文件并重试。",
+            "auth_summary_login_required",
+            "建议启用 Browser Cookies；如继续使用文件模式，请重新导出 `www.youtube.com_cookies.txt`。",
             True,
         ),
         (
@@ -99,8 +147,8 @@ def detect_auth_diagnostic(error_output):
                 "geo-restricted",
             ],
             "ERROR",
-            "检测到访问受限、地区限制或资源不可用问题",
-            "请优先检查 cookies、视频可见性、地区限制与代理设置；若内容本身不可用，则无法通过重试解决。",
+            "auth_summary_forbidden",
+            "建议检查 cookies 与代理设置；可尝试启用 Browser Cookies 或 PO Token；若内容本身不可用则无法通过重试解决。",
             True,
         ),
         (
@@ -115,16 +163,16 @@ def detect_auth_diagnostic(error_output):
                 "unable to extract yt initial data",
             ],
             "WARNING",
-            "检测到 YouTube JS Challenge / 提取器环境问题",
-            "这通常不是 cookies 本身失效，可优先检查 [`yt-dlp.exe`](yt-dlp.exe)、[`deno.exe`](deno.exe) 与当前网络环境。",
+            "auth_summary_js_challenge",
+            "这通常不是 cookies 本身失效，可优先检查 `yt-dlp.exe` 版本与当前网络环境。",
             False,
         ),
         (
             AUTH_REASON_BOT_CHECK,
             ["not a bot", "unusual traffic", "to continue, please type the characters"],
             "WARNING",
-            "检测到机器人校验或异常流量限制",
-            "请稍后重试，必要时更换网络环境，并准备有效 cookies。",
+            "auth_summary_bot_check",
+            "建议稍后重试，必要时更换网络环境，并使用有效 cookies。",
             True,
         ),
         (
@@ -147,7 +195,7 @@ def detect_auth_diagnostic(error_output):
                 "tls",
             ],
             "WARNING",
-            "检测到网络连接或代理环境问题",
+            "auth_summary_network",
             "请先检查网络连通性、代理配置与 TLS/SSL 环境，再判断是否需要重新导出 cookies。",
             False,
         ),
@@ -171,9 +219,9 @@ def detect_auth_diagnostic(error_output):
         ok=False,
         category=AUTH_REASON_UNKNOWN,
         level=AUTH_LEVEL_WARNING,
-        summary="标题/元数据获取失败，原因暂未识别",
+        summary="auth_summary_unknown",
         detail=raw_output[:500],
-        action_hint="请直接查看后续“标题获取原始日志”内容，优先判断是否为链接失效、网络异常、yt-dlp 版本问题或站点风控。",
+        action_hint="auth_action_unknown",
         is_auth_related=False,
         raw_output=raw_output,
     )
@@ -194,7 +242,7 @@ def _safe_int(value):
 def _format_filesize(size_bytes):
     size = _safe_int(size_bytes)
     if size <= 0:
-        return "未知"
+        return ""
     units = ["B", "KB", "MB", "GB", "TB"]
     size_float = float(size)
     for unit in units:
@@ -203,7 +251,7 @@ def _format_filesize(size_bytes):
                 return f"{int(size_float)} {unit}"
             return f"{size_float:.1f} {unit}"
         size_float /= 1024
-    return "未知"
+    return ""
 
 
 def _build_format_entry(fmt):
@@ -229,6 +277,18 @@ def _build_format_entry(fmt):
     is_video_only = vcodec != "none" and acodec == "none"
     is_audio_only = vcodec == "none" and acodec != "none"
     needs_merge = is_video_only
+    note_parts = []
+    if is_audio_only:
+        note_parts.append("仅音频")
+    elif is_video_only:
+        note_parts.append("仅视频")
+    else:
+        note_parts.append("含音频")
+    if needs_merge:
+        note_parts.append("需合并")
+    if bitrate:
+        note_parts.append(f"{bitrate}k")
+    note = " / ".join(note_parts)
 
     return {
         "format_id": format_id,
@@ -242,6 +302,7 @@ def _build_format_entry(fmt):
         "filesize": _format_filesize(filesize),
         "filesize_bytes": _safe_int(filesize),
         "dynamic_range": dynamic_range,
+        "note": note,
         "is_video_only": is_video_only,
         "is_audio_only": is_audio_only,
         "needs_merge": needs_merge,
@@ -254,13 +315,13 @@ def _decode_bytes(output_bytes):
         return ""
     if isinstance(output_bytes, str):
         return output_bytes
-    try:
-        return output_bytes.decode('utf-8')
-    except UnicodeDecodeError:
+    candidates = ["utf-8", "utf-8-sig", "gb18030", "gbk", "cp936"]
+    for encoding in candidates:
         try:
-            return output_bytes.decode('gbk')
+            return output_bytes.decode(encoding)
         except UnicodeDecodeError:
-            return output_bytes.decode('utf-8', errors='replace')
+            continue
+    return output_bytes.decode("utf-8", errors="replace")
 
 
 def _extract_error_text(proc):
@@ -268,25 +329,108 @@ def _extract_error_text(proc):
     return _decode_bytes(err).strip()
 
 
-def _run_json_command(base_cmd, cookies_path, timeout, startupinfo):
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    proc = subprocess.run(
-        base_cmd,
-        capture_output=True,
-        timeout=timeout,
-        startupinfo=startupinfo,
-        env=env
-    )
-
-    used_cookies = False
-    if proc.returncode != 0 and cookies_path and os.path.exists(cookies_path):
+def _run_subprocess_checked(cmd, timeout, startupinfo, env):
+    try:
         proc = subprocess.run(
-            base_cmd[:-1] + ["--cookies", cookies_path, base_cmd[-1]],
+            cmd,
             capture_output=True,
             timeout=timeout,
             startupinfo=startupinfo,
-            env=env
+            env=env,
+            text=False,
+        )
+        return SimpleNamespace(
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            failure_kind="",
+            failure_detail="",
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = f"subprocess_timeout: {exc}"
+        return SimpleNamespace(
+            returncode=-1,
+            stdout=getattr(exc, "stdout", b"") or b"",
+            stderr=detail,
+            failure_kind="timeout",
+            failure_detail=detail,
+        )
+    except FileNotFoundError as exc:
+        detail = f"subprocess_missing: {exc}"
+        return SimpleNamespace(
+            returncode=-1,
+            stdout=b"",
+            stderr=detail,
+            failure_kind="missing_binary",
+            failure_detail=detail,
+        )
+    except OSError as exc:
+        detail = f"subprocess_oserror: {exc}"
+        return SimpleNamespace(
+            returncode=-1,
+            stdout=b"",
+            stderr=detail,
+            failure_kind="os_error",
+            failure_detail=detail,
+        )
+    except Exception as exc:
+        detail = f"subprocess_error: {exc}"
+        return SimpleNamespace(
+            returncode=-1,
+            stdout=b"",
+            stderr=detail,
+            failure_kind="unexpected_error",
+            failure_detail=detail,
+        )
+
+
+def _run_json_command(base_cmd, cookies_path, timeout, startupinfo, cookies_mode="file", cookies_browser="", use_po_token=False):
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    mode = (cookies_mode or "file").strip().lower()
+    browser = (cookies_browser or "").strip().lower()
+    cookies_args = build_cookies_args(mode, browser, cookies_path)
+    
+    # [新增] 注入 PO Token 参数
+    pot_args = []
+    if use_po_token:
+        manager = get_pot_manager()
+        token_data = manager.get_token()
+        if token_data:
+            visitor_data = token_data.get("visitorData")
+            po_token = token_data.get("token")
+            if visitor_data and po_token:
+                pot_args = [
+                    "--extractor-args",
+                    f"youtube:player_client=web,po_token=visitor_data={visitor_data},po_token={po_token}"
+                ]
+
+    use_cookies_first = bool(cookies_args and cookies_args[0] == "--cookies-from-browser")
+
+    if use_cookies_first:
+        proc = _run_subprocess_checked(
+            base_cmd[:-1] + cookies_args + pot_args + [base_cmd[-1]],
+            timeout,
+            startupinfo,
+            env,
+        )
+        used_cookies = proc.returncode == 0
+        return proc, used_cookies
+
+    proc = _run_subprocess_checked(
+        base_cmd[:-1] + pot_args + [base_cmd[-1]],
+        timeout,
+        startupinfo,
+        env,
+    )
+
+    used_cookies = False
+    if proc.returncode != 0 and cookies_args and cookies_args[0] == "--cookies":
+        proc = _run_subprocess_checked(
+            base_cmd[:-1] + cookies_args + pot_args + [base_cmd[-1]],
+            timeout,
+            startupinfo,
+            env,
         )
         used_cookies = proc.returncode == 0
 
@@ -420,10 +564,19 @@ def _parse_batch_result(info, source_url, used_cookies, error_output):
 
 
 class YouTubeMetadataService:
-    def __init__(self, yt_dlp_path, cookies_file_path, startupinfo=None):
+    def __init__(self, yt_dlp_path, cookies_file_path, startupinfo=None, cookies_mode="file", cookies_browser="", use_po_token=False):
         self.yt_dlp_path = yt_dlp_path
         self.cookies_file_path = cookies_file_path
         self.startupinfo = startupinfo
+        self.cookies_mode = (cookies_mode or "file").strip().lower()
+        self.cookies_browser = (cookies_browser or "").strip().lower()
+        self.use_po_token = use_po_token
+
+    def update_cookies_settings(self, cookies_mode, cookies_browser, use_po_token=None):
+        self.cookies_mode = (cookies_mode or "file").strip().lower()
+        self.cookies_browser = (cookies_browser or "").strip().lower()
+        if use_po_token is not None:
+            self.use_po_token = use_po_token
 
     def _json_parse_error_result(self, message, used_cookies=False):
         diagnostic = detect_auth_diagnostic(message)
@@ -439,49 +592,57 @@ class YouTubeMetadataService:
 
     def inspect_cookies_status(self):
         exists = bool(self.cookies_file_path and os.path.exists(self.cookies_file_path))
+        if self.cookies_mode == "browser" and self.cookies_browser:
+            return {
+                "exists": True,
+                "summary": f"Browser Cookies: {self.cookies_browser}",
+                "action_hint": "如遇访问受限，可尝试切换浏览器或更新 cookies 文件。",
+            }
         if exists:
             return {
                 "exists": True,
                 "summary": "cookies 文件存在",
-                "action_hint": "如近期出现登录或 403 问题，可重新导出 [`www.youtube.com_cookies.txt`](www.youtube.com_cookies.txt)。",
+                "action_hint": "如近期出现登录或 403 问题，可重新导出 `www.youtube.com_cookies.txt`。",
             }
         return {
             "exists": False,
             "summary": "未找到 cookies 文件",
-            "action_hint": "如需访问登录、年龄限制或会员内容，请导出 [`www.youtube.com_cookies.txt`](www.youtube.com_cookies.txt)。",
+            "action_hint": "如需访问登录、年龄限制或会员内容，请导出 `www.youtube.com_cookies.txt` 或启用 Browser Cookies。",
         }
 
     def fetch_title(self, url):
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         title_cmd = [self.yt_dlp_path, "--get-title", "--skip-download", "--no-warnings", url]
-        title_proc = subprocess.run(
-            title_cmd,
-            capture_output=True,
-            timeout=30,
-            startupinfo=self.startupinfo,
-            env=env
-        )
+        cookies_args = build_cookies_args(self.cookies_mode, self.cookies_browser, self.cookies_file_path)
+        use_cookies_first = bool(cookies_args and cookies_args[0] == "--cookies-from-browser")
 
         used_cookies = False
-        if title_proc.returncode != 0 and os.path.exists(self.cookies_file_path):
-            title_cmd_with_cookies = [
-                self.yt_dlp_path,
-                "--get-title",
-                "--skip-download",
-                "--no-warnings",
-                "--cookies",
-                self.cookies_file_path,
-                url,
-            ]
-            title_proc = subprocess.run(
-                title_cmd_with_cookies,
-                capture_output=True,
-                timeout=30,
-                startupinfo=self.startupinfo,
-                env=env
+        if use_cookies_first:
+            title_proc = _run_subprocess_checked(
+                title_cmd[:-1] + cookies_args + [title_cmd[-1]],
+                30,
+                self.startupinfo,
+                env,
             )
             used_cookies = title_proc.returncode == 0
+        else:
+            title_proc = _run_subprocess_checked(
+                title_cmd,
+                30,
+                self.startupinfo,
+                env,
+            )
+
+            if title_proc.returncode != 0 and cookies_args and cookies_args[0] == "--cookies":
+                title_cmd_with_cookies = title_cmd[:-1] + cookies_args + [title_cmd[-1]]
+                title_proc = _run_subprocess_checked(
+                    title_cmd_with_cookies,
+                    30,
+                    self.startupinfo,
+                    env,
+                )
+                used_cookies = title_proc.returncode == 0
 
         title = None
         if title_proc.returncode == 0 and title_proc.stdout:
@@ -489,8 +650,18 @@ class YouTubeMetadataService:
             if parsed_title:
                 title = parsed_title
 
-        error_output = _extract_error_text(title_proc)
-        diagnostic = detect_auth_diagnostic(error_output)
+        stderr_output = _decode_bytes(title_proc.stderr).strip() if getattr(title_proc, "stderr", None) else ""
+        failure_detail = getattr(title_proc, "failure_detail", "") or ""
+        error_output = stderr_output or failure_detail
+        if title is not None and title_proc.returncode == 0:
+            diagnostic = AuthDiagnostic(
+                ok=True,
+                category=AUTH_REASON_NONE,
+                level=AUTH_LEVEL_INFO,
+                summary="auth_summary_ok",
+            )
+        else:
+            diagnostic = detect_auth_diagnostic(error_output)
         return {
             "ok": title is not None,
             "title": title,
@@ -498,12 +669,26 @@ class YouTubeMetadataService:
             "cookies_error": (not diagnostic.ok) and diagnostic.is_auth_related,
             "auth_diagnostic": diagnostic,
             "error_output": error_output or "",
+            "error_detail": failure_detail or error_output or "",
+            "failure_kind": getattr(title_proc, "failure_kind", "") or "",
             "returncode": title_proc.returncode,
         }
 
-    def fetch_formats(self, url):
-        cmd = [self.yt_dlp_path, "--dump-single-json", "--no-warnings", url]
-        proc, used_cookies = _run_json_command(cmd, self.cookies_file_path, 60, self.startupinfo)
+    def fetch_formats(self, url, use_po_token=False):
+        normalized, reason = _parse_and_validate_url(url, youtube_only=True)
+        if not normalized:
+            message = "metadata_url_invalid" if reason != "empty" else "URL 不能为空"
+            return _build_invalid_url_result(message)
+        cmd = [self.yt_dlp_path, "--dump-single-json", "--no-warnings", normalized]
+        proc, used_cookies = _run_json_command(
+            cmd,
+            self.cookies_file_path,
+            60,
+            self.startupinfo,
+            cookies_mode=self.cookies_mode,
+            cookies_browser=self.cookies_browser,
+            use_po_token=use_po_token,
+        )
 
         if proc.returncode != 0:
             error_msg = _extract_error_text(proc)
@@ -516,12 +701,14 @@ class YouTubeMetadataService:
                 "cookies_error": (not diagnostic.ok) and diagnostic.is_auth_related,
                 "auth_diagnostic": diagnostic,
                 "error_output": (error_msg or "")[:200],
+                "error_detail": (error_msg or ""),
+                "failure_kind": getattr(proc, "failure_kind", "") or "",
             }
 
         try:
             info = json.loads(_decode_bytes(proc.stdout).strip())
         except Exception as exc:
-            return self._json_parse_error_result(f"JSON 解析失败: {exc}", used_cookies=used_cookies)
+            return self._json_parse_error_result(f"metadata_json_parse_failed: {exc}", used_cookies=used_cookies)
         video_info = {
             "title": info.get("title") or "",
             "video_id": info.get("id") or "",
@@ -552,13 +739,32 @@ class YouTubeMetadataService:
             "video_info": video_info,
             "used_cookies": used_cookies,
             "cookies_error": False,
-            "auth_diagnostic": AuthDiagnostic(ok=True, category=AUTH_REASON_NONE, level=AUTH_LEVEL_INFO, summary="格式获取成功"),
+            "auth_diagnostic": AuthDiagnostic(ok=True, category=AUTH_REASON_NONE, level=AUTH_LEVEL_INFO, summary="auth_summary_ok"),
             "error_output": "未找到符合条件的格式" if not formats else "",
         }
 
-    def fetch_playlist_entries(self, url):
-        cmd = [self.yt_dlp_path, "--dump-single-json", "--flat-playlist", "--no-warnings", url]
-        proc, used_cookies = _run_json_command(cmd, self.cookies_file_path, 90, self.startupinfo)
+    def fetch_playlist_entries(self, url, use_po_token=False):
+        normalized, reason = _parse_and_validate_url(url, youtube_only=True)
+        if not normalized:
+            message = "metadata_url_invalid" if reason != "empty" else "URL 不能为空"
+            diagnostic = detect_auth_diagnostic(message)
+            return YouTubeBatchParseResult(
+                ok=False,
+                used_cookies=False,
+                cookies_error=(not diagnostic.ok) and diagnostic.is_auth_related,
+                auth_diagnostic=diagnostic,
+                error_output=message[:400],
+            )
+        cmd = [self.yt_dlp_path, "--dump-single-json", "--flat-playlist", "--no-warnings", normalized]
+        proc, used_cookies = _run_json_command(
+            cmd,
+            self.cookies_file_path,
+            90,
+            self.startupinfo,
+            cookies_mode=self.cookies_mode,
+            cookies_browser=self.cookies_browser,
+            use_po_token=use_po_token,
+        )
         if proc.returncode != 0:
             error_msg = _extract_error_text(proc)
             diagnostic = detect_auth_diagnostic(error_msg)
@@ -573,7 +779,7 @@ class YouTubeMetadataService:
         try:
             info = json.loads(_decode_bytes(proc.stdout).strip())
         except Exception as exc:
-            message = f"JSON 解析失败: {exc}"
+            message = f"metadata_json_parse_failed: {exc}"
             diagnostic = detect_auth_diagnostic(message)
             return YouTubeBatchParseResult(
                 ok=False,
@@ -584,13 +790,31 @@ class YouTubeMetadataService:
             )
         return _parse_batch_result(info, url, used_cookies, "")
 
-    def fetch_channel_entries(self, url):
-        normalized_url = (url or "").strip()
+    def fetch_channel_entries(self, url, use_po_token=False):
+        normalized_url, reason = _parse_and_validate_url(url, youtube_only=True)
+        if not normalized_url:
+            message = "metadata_url_invalid" if reason != "empty" else "URL 不能为空"
+            diagnostic = detect_auth_diagnostic(message)
+            return YouTubeBatchParseResult(
+                ok=False,
+                used_cookies=False,
+                cookies_error=(not diagnostic.ok) and diagnostic.is_auth_related,
+                auth_diagnostic=diagnostic,
+                error_output=message[:400],
+            )
         if normalized_url and not re.search(r"/(videos|streams|shorts|featured)([/?#]|$)", normalized_url):
             normalized_url = normalized_url.rstrip("/") + "/videos"
 
         cmd = [self.yt_dlp_path, "--dump-single-json", "--flat-playlist", "--playlist-end", "100", "--no-warnings", normalized_url]
-        proc, used_cookies = _run_json_command(cmd, self.cookies_file_path, 90, self.startupinfo)
+        proc, used_cookies = _run_json_command(
+            cmd,
+            self.cookies_file_path,
+            90,
+            self.startupinfo,
+            cookies_mode=self.cookies_mode,
+            cookies_browser=self.cookies_browser,
+            use_po_token=use_po_token,
+        )
         if proc.returncode != 0:
             error_msg = _extract_error_text(proc)
             diagnostic = detect_auth_diagnostic(error_msg)
@@ -605,7 +829,7 @@ class YouTubeMetadataService:
         try:
             info = json.loads(_decode_bytes(proc.stdout).strip())
         except Exception as exc:
-            message = f"JSON 解析失败: {exc}"
+            message = f"metadata_json_parse_failed: {exc}"
             diagnostic = detect_auth_diagnostic(message)
             return YouTubeBatchParseResult(
                 ok=False,

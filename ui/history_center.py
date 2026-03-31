@@ -10,7 +10,7 @@ class HistoryCenterWindow:
         self.history_data = history_data or []
         self.history_mode = history_mode
         self.window = tk.Toplevel(app.root)
-        self.window.title("下载历史记录 - 详细信息")
+        self.window.title(self.app.get_text("history_window_title"))
         self.window.geometry("800x600")
         self._build()
 
@@ -26,7 +26,7 @@ class HistoryCenterWindow:
         scrollbar.config(command=text.yview)
 
         if not self.history_data:
-            text.insert("end", "暂无历史记录")
+            text.insert("end", self.app.get_text("history_empty"))
         else:
             for item in self.history_data:
                 title = item.get('title', 'N/A')
@@ -34,18 +34,22 @@ class HistoryCenterWindow:
                 path = item.get('path', 'N/A')
                 time_str = item.get('time', 'N/A')
                 profile = item.get('profile') or item.get('kwargs', {})
+                task_type = item.get('type') or item.get('task_type') or 'youtube'
+                source_platform = item.get('source_platform') or item.get('source') or ''
 
-                detail_str = f"任务标题: {title}\n"
-                detail_str += "下载类型: YouTube\n"
-                detail_str += f"URL: {url}\n"
-                detail_str += f"保存路径: {path}\n"
-                detail_str += f"完成时间: {time_str}\n"
-                detail_str += f"下载格式: {profile.get('format', '默认')}\n"
-                detail_str += f"字幕语言: {profile.get('sub_lang', '无')}\n"
-                detail_str += f"重试次数: {profile.get('retries', 3)}\n"
+                detail_str = f"{self.app.get_text('history_label_title')}: {title}\n"
+                detail_str += f"{self.app.get_text('history_label_type')}: {task_type}\n"
+                if source_platform:
+                    detail_str += f"{self.app.get_text('history_label_source')}: {source_platform}\n"
+                detail_str += f"{self.app.get_text('history_label_url')}: {url}\n"
+                detail_str += f"{self.app.get_text('history_label_path')}: {path}\n"
+                detail_str += f"{self.app.get_text('history_label_time')}: {time_str}\n"
+                detail_str += f"{self.app.get_text('history_label_format')}: {profile.get('format', self.app.get_text('history_default'))}\n"
+                detail_str += f"{self.app.get_text('history_label_sub_lang')}: {profile.get('sub_lang', self.app.get_text('history_none'))}\n"
+                detail_str += f"{self.app.get_text('history_label_retries')}: {profile.get('retries', 3)}\n"
                 custom_filename = profile.get('custom_filename', '')
                 if custom_filename:
-                    detail_str += f"自定义文件名: {custom_filename}\n"
+                    detail_str += f"{self.app.get_text('history_label_custom_filename')}: {custom_filename}\n"
                 detail_str += "=" * 60 + "\n\n"
                 text.insert("end", detail_str)
 
@@ -58,5 +62,5 @@ class HistoryCenterWindow:
             self.app.clear_all_history(self.history_mode)
             self.window.destroy()
 
-        ttk.Button(btn_frame, text="🗑 清空全部历史", command=on_clear_all).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="关闭", command=self.window.destroy).pack(side='right', padx=5)
+        ttk.Button(btn_frame, text=self.app.get_text("history_btn_clear"), command=on_clear_all).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text=self.app.get_text("common_close"), command=self.window.destroy).pack(side='right', padx=5)

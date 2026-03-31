@@ -9,7 +9,7 @@ class QueueTab(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self.manager = manager
-        parent.add(self, text='下载队列')
+        parent.add(self, text=self.app.get_text("tab_queue"))
         self._build_layout()
 
     def _get_pane_state(self):
@@ -71,27 +71,67 @@ class QueueTab(ttk.Frame):
         self.container_pane.bind("<ButtonRelease-1>", self._on_pane_released)
         self.container_pane.bind("<Configure>", self._on_pane_configure)
 
-        queue_frame = ttk.LabelFrame(container, text="   下载队列", padding="5")
-        log_frame = ttk.LabelFrame(container, text="   实时日志", padding="5")
-        container.add(queue_frame, weight=3)
-        container.add(log_frame, weight=2)
+        font_family = getattr(self.app, 'FONT_FAMILY', 'Microsoft YaHei')
+        font_size = getattr(self.app, 'FONT_SIZE_NORMAL', 10)
+
+        queue_card = ttk.Frame(container, style="Card.TFrame", padding=6)
+        queue_header = ttk.Frame(queue_card, style="Card.TFrame")
+        queue_header.pack(fill='x', pady=(0, 4))
+        ttk.Label(
+            queue_header,
+            text=self.app.get_text("queue_title"),
+            style="Card.TLabel",
+            font=(font_family, max(9, font_size - 1), 'bold'),
+        ).pack(side='left')
+        queue_frame = ttk.Frame(queue_card, style="Card.TFrame")
+        queue_frame.pack(fill='both', expand=True)
+
+        log_card = ttk.Frame(container, style="Card.TFrame", padding=6)
+        log_header = ttk.Frame(log_card, style="Card.TFrame")
+        log_header.pack(fill='x', pady=(0, 4))
+        ttk.Label(
+            log_header,
+            text=self.app.get_text("queue_log"),
+            style="Card.TLabel",
+            font=(font_family, max(9, font_size - 1), 'bold'),
+        ).pack(side='left')
+        log_frame = ttk.Frame(log_card, style="Card.TFrame")
+        log_frame.pack(fill='both', expand=True)
+
+        container.add(queue_card, weight=3)
+        container.add(log_card, weight=2)
 
         cols = ("id", "status", "progress", "speed", "name", "type")
         task_tree = ttk.Treeview(
             queue_frame,
             columns=cols,
             show="headings",
-            selectmode="extended",
+            selectmode="browse",
             height=14,
             takefocus=False,
         )
 
-        task_tree.heading("id", text="    ID", anchor="w")
-        task_tree.heading("status", text="状态", anchor="w")
-        task_tree.heading("progress", text="进度", anchor="w")
-        task_tree.heading("speed", text="速度", anchor="w")
-        task_tree.heading("name", text="文件名", anchor="w")
-        task_tree.heading("type", text="类型", anchor="w")
+        task_tree.heading(
+            "id",
+            text=self.app.get_text("queue_col_id"),
+            anchor="w",
+            command=lambda: self.manager.set_sort("default"),
+        )
+        task_tree.heading(
+            "status",
+            text=self.app.get_text("queue_col_status"),
+            anchor="w",
+            command=lambda: self.manager.set_sort("status"),
+        )
+        task_tree.heading(
+            "progress",
+            text=self.app.get_text("queue_col_progress"),
+            anchor="w",
+            command=lambda: self.manager.set_sort("progress"),
+        )
+        task_tree.heading("speed", text=self.app.get_text("queue_col_speed"), anchor="w")
+        task_tree.heading("name", text=self.app.get_text("queue_col_name"), anchor="w")
+        task_tree.heading("type", text=self.app.get_text("queue_col_type"), anchor="w")
 
         task_tree.column("id", width=90, minwidth=70, anchor="w")
         task_tree.column("status", width=110, minwidth=90, anchor="w")
@@ -110,18 +150,17 @@ class QueueTab(ttk.Frame):
         queue_frame.grid_rowconfigure(0, weight=1)
         queue_frame.grid_columnconfigure(0, weight=1)
 
-        btn_frame = ttk.Frame(queue_frame)
+        btn_frame = ttk.Frame(queue_frame, style="Card.TFrame")
         btn_frame.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(8, 0))
-        ttk.Button(btn_frame, text="▶ 开始全部", command=self.manager.start_all_tasks, style="Success.TButton").pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="↻ 重试选中", command=lambda: self.manager.retry_task(task_tree), style="Small.TButton").pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="⏹ 停止选中", command=lambda: self.manager.stop_selected(task_tree), style="Small.TButton").pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="❌ 停止全部", command=self.manager.stop_all, style="Danger.TButton").pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="🗑 删除选中", command=lambda: self.manager.delete_selected(task_tree), style="Small.TButton").pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="🧹 清除完成", command=self.manager.clear_completed, style="Small.TButton").pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="📜 历史记录", command=lambda: self.app.show_history_window(self.manager.mode), style="Small.TButton").pack(side='right', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_retry"), command=lambda: self.manager.retry_task(task_tree), style="Info.Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_start_all"), command=self.manager.start_all_tasks, style="Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_stop"), command=lambda: self.manager.stop_selected(task_tree), style="Warning.Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_stop_all"), command=self.manager.stop_all, style="Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_delete"), command=lambda: self.manager.delete_selected(task_tree), style="Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_clear"), command=self.manager.clear_completed, style="Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_delete_all"), command=self.manager.delete_all_tasks, style="Small.TButton").pack(side='left', padx=2)
+        ttk.Button(btn_frame, text=self.app.get_text("queue_btn_history"), command=lambda: self.app.show_history_window(self.manager.mode), style="Small.TButton").pack(side='right', padx=2)
 
-        font_family = getattr(self.app, 'FONT_FAMILY', 'Microsoft YaHei')
-        font_size = getattr(self.app, 'FONT_SIZE_NORMAL', 10)
         log_font_size = max(8, font_size - 1)
         log_text = tk.Text(
             log_frame,
@@ -146,6 +185,8 @@ class QueueTab(ttk.Frame):
         log_text.tag_config("INFO", foreground="#1565c0")
         log_text.tag_config("WARN", foreground="#e65100")
         log_text.tag_config("WARNING", foreground="#e65100")
+        log_text.tag_config("SUMMARY", foreground="#888888")
 
         self.manager.task_tree = task_tree
         self.manager.log_text = log_text
+        self.manager.update_list()

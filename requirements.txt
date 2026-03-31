@@ -1,0 +1,22 @@
+# Core runtime dependencies for YCB
+# NOTE: stdlib modules like tkinter, sqlite3 are not listed.
+
+# Downloader engine
+# Keep within a stable yearly range to avoid breaking changes
+# (update as needed when yt-dlp releases)
+yt-dlp>=2026.03.03,<2027.01.01
+
+# HTTP requests (used in update checks or networking utilities)
+requests>=2.32.5,<3.0.0
+
+# Clipboard utilities (if used)
+pyperclip>=1.11.0,<2.0.0
+
+# Process utilities (if used for monitoring)
+psutil>=7.2.2,<8.0.0
+
+# Optional UI theming (if used)
+customtkinter>=5.2.2,<6.0.0
+
+# Optional logging utility (if used)
+loguru>=0.7.3,<1.0.0
