@@ -14,6 +14,8 @@
 
 ---
 
+![single video](images/single_video.jpg)
+
 ## ✨ 功能总览
 
 - **单视频下载**：支持 YouTube 与 Generic URL（非 YouTube 通用下载）
