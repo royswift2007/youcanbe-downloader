@@ -14,6 +14,15 @@ A desktop YouTube downloader and local media toolkit built on `yt-dlp` + `ffmpeg
 
 ---
 
+
+![single video](images/single_video.jpg)
+
+![playlist](images/playlist.jpg)
+
+![queue](images/queue.jpg)
+
+![settings](images/settings.jpg)
+
 ## ✨ Features
 
 - **Single video**: YouTube + Generic URL download
