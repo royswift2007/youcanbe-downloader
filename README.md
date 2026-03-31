@@ -16,6 +16,12 @@
 
 ![single video](images/single_video.jpg)
 
+![playlist](images/playlist.jpg)
+
+![queue](images/queue.jpg)
+
+![settings](images/settings.jpg)
+
 ## ✨ 功能总览
 
 - **单视频下载**：支持 YouTube 与 Generic URL（非 YouTube 通用下载）
