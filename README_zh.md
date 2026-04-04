@@ -9,7 +9,8 @@
 - **适用平台**：Windows（当前仓库提供 `.exe` 组件）
 
 > English version: [`README.md`](README.md)
-> 使用手册：[`usage_intro.md`](usage_intro.md)
+>
+> 深度使用说明与功能手册：[`usage_intro.md`](usage_intro.md)
 
 
 > [!IMPORTANT]
