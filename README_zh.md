@@ -9,6 +9,8 @@
 - **适用平台**：Windows（当前仓库提供 `.exe` 组件）
 
 > English version: [`README.md`](README.md)
+> 使用手册：[`usage_intro.md`](usage_intro.md)
+
 
 > [!IMPORTANT]
 > 首次运行前/首次运行时，请先进入 **设置 → 组件中心**，点击“**组件更新（yt-dlp/ffmpeg/deno）**”。
