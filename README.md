@@ -207,3 +207,19 @@ This project uses **GPLv3 + Commons Clause** (non-commercial). See [`LICENSE`](L
 - The old queue button label `Retry Selected` is now `Start / Retry`.
 - For the full parameter list and detailed guidance, see [`usage_intro_en.md`](usage_intro_en.md) (this README is a compact version).
 - If you distribute binaries, ship the source and license file together.
+
+---
+
+![single_video](images/single_video.jpg)
+
+---
+
+![playlist](images/playlist.jpg)
+
+---
+
+![queue](images/queue.jpg)
+
+---
+
+![settings](images/settings.jpg)
