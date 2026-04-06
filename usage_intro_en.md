@@ -5,6 +5,8 @@ This application is built on `yt-dlp` + `ffmpeg` + optional `deno`. It supports 
 > [!IMPORTANT]
 > Before first use or on first launch, go to **Settings -> Components Center** and click **Component Update (yt-dlp/ffmpeg/deno)**.
 > The program depends on these components for downloading and processing. If they are not available locally yet, update them before using the app.
+> YCB only recognizes `yt-dlp / ffmpeg / deno` inside the program directory and does not use same-named tools from the system `PATH`.
+> The installer checks, the in-app Components Center, and the Runtime Status Center all follow the same rule: only components inside the program directory are treated as installed and available.
 
 ---
 
@@ -719,6 +721,9 @@ After opening the **Authentication Status Center**, focus on the following items
 **Additional Notes**
 - The **Update** button in the Components Center is currently a unified update entry that handles `yt-dlp / ffmpeg / deno` together, rather than updating only one of them.
 - If you are missing only `yt-dlp` or `ffmpeg`, you can still use the same entry and let the program fill in the missing component automatically.
+- YCB only recognizes `yt-dlp / ffmpeg / deno` inside the program directory and does not read same-named tools from the system `PATH`.
+- Because of that, if these tools exist in your system environment but the program directory does not contain the corresponding files, the Components Center will still show them as missing, and the Runtime Status Center will also treat them as missing components.
+- The installer's component detection follows the same rule: it only checks whether the program directory already contains the components and does not count tools that only exist in the system `PATH` as installed.
 - `deno` mainly affects Hooks and some extension capabilities. Its absence does not necessarily break normal downloads, but it limits extension scripts.
 - Exported diagnostics are useful when investigating issues such as wrong versions, bad paths, or unavailable components.
 

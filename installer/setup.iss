@@ -1,8 +1,8 @@
 #define MyAppName "YCB"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "YCB"
 #define MyAppExeName "YCB.exe"
-#define MyOutputName "YCB-Setup-v0.1.0"
+#define MyOutputName "YCB-Setup"
 
 [Setup]
 AppId={{B9C6CB8E-8F85-4E8D-B3F4-00C3D094F10A}
@@ -62,7 +62,7 @@ Name: "comp_deno"; Description: "{cm:ComponentDeno}"; Types: custom
 Name: "desktopicon"; Description: "{cm:TaskDesktopIcon}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\YCB.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: main
+Source: "..\dist\YCB\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: main
 Source: "..\usage_intro.md"; DestDir: "{app}"; Flags: ignoreversion; Components: main
 Source: "..\usage_intro_en.md"; DestDir: "{app}"; Flags: ignoreversion; Components: main
 Source: "..\dist\backend_setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall ignoreversion
@@ -87,6 +87,7 @@ var
   MissingComponentsText: string;
   LastProgressMessage: string;
   FinishNoticeApplied: Boolean;
+  KeepUserDataOnUninstall: Boolean;
 
 function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;
   external 'SetTimer@user32.dll stdcall';
@@ -114,6 +115,34 @@ begin
     Result := 'zh';
 end;
 
+function HasExplicitUserLanguagePreference(): Boolean;
+var
+  WindowPosPath: string;
+  Lines: TArrayOfString;
+  JsonText: string;
+  I: Integer;
+  LangNeedleZh: string;
+  LangNeedleEn: string;
+begin
+  Result := False;
+  WindowPosPath := ExpandConstant('{localappdata}\YCB\window_pos.json');
+  if not FileExists(WindowPosPath) then
+    WindowPosPath := ExpandConstant('{userappdata}\YCB\window_pos.json');
+  if not FileExists(WindowPosPath) then
+    Exit;
+
+  if not LoadStringsFromFile(WindowPosPath, Lines) then
+    Exit;
+
+  JsonText := '';
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    JsonText := JsonText + Lines[I];
+
+  LangNeedleZh := '"lang": "zh"';
+  LangNeedleEn := '"lang": "en"';
+  Result := (Pos(LangNeedleZh, JsonText) > 0) or (Pos(LangNeedleEn, JsonText) > 0);
+end;
+
 procedure WriteFirstLaunchLanguagePreference;
 var
   PrefPath: string;
@@ -121,6 +150,11 @@ var
   UserLocalFlagPath: string;
 begin
   PrefPath := ExpandConstant('{app}\install_prefs.json');
+  if HasExplicitUserLanguagePreference() then begin
+    DeleteFile(PrefPath);
+    Exit;
+  end;
+
   JsonText := '{' + #13#10 +
     '  "lang": "' + GetInstallerLaunchLangCode() + '"' + #13#10 +
     '}';
@@ -129,6 +163,103 @@ begin
   DeleteFile(UserLocalFlagPath);
   if CompareText(UserLocalFlagPath, ExpandConstant('{userappdata}\YCB\.installer_lang_consumed')) <> 0 then
     DeleteFile(ExpandConstant('{userappdata}\YCB\.installer_lang_consumed'));
+end;
+
+function RemoveDirTreeIfPresent(const DirPath: string): Boolean;
+begin
+  Result := True;
+  if DirPath = '' then
+    Exit;
+  if DirExists(DirPath) then
+    Result := DelTree(DirPath, True, True, True);
+end;
+
+function GetUserDataDirsText: string;
+var
+  LocalDir: string;
+  RoamingDir: string;
+begin
+  LocalDir := ExpandConstant('{localappdata}\YCB');
+  RoamingDir := ExpandConstant('{userappdata}\YCB');
+  Result := LocalDir;
+  if CompareText(LocalDir, RoamingDir) <> 0 then
+    Result := Result + #13#10 + RoamingDir;
+end;
+
+function GetInstallDirText: string;
+begin
+  Result := ExpandConstant('{app}');
+end;
+
+function InitializeUninstall(): Boolean;
+var
+  Choice: Integer;
+  PromptText: string;
+begin
+  PromptText := T('Keep or remove YCB user data during uninstall?',
+    'Keep or remove YCB user data during uninstall?');
+  PromptText := PromptText + Chr(13) + Chr(10) + Chr(13) + Chr(10);
+  PromptText := PromptText + T('Yes: keep this data and uninstall only program files.',
+    'Yes: keep this data and uninstall only program files.');
+  PromptText := PromptText + Chr(13) + Chr(10);
+  PromptText := PromptText + T('No: remove program files, YCB user data, and the remaining YCB install folder for a clean pre-install state.',
+    'No: remove program files, YCB user data, and the remaining YCB install folder for a clean pre-install state.');
+  PromptText := PromptText + Chr(13) + Chr(10);
+  PromptText := PromptText + T('Cancel: stop the uninstall.',
+    'Cancel: stop the uninstall.');
+  PromptText := PromptText + Chr(13) + Chr(10) + Chr(13) + Chr(10) + GetInstallDirText + Chr(13) + Chr(10) + GetUserDataDirsText;
+
+  Choice := MsgBox(PromptText, mbConfirmation, MB_YESNOCANCEL);
+  if Choice = IDCANCEL then begin
+    Result := False;
+    Exit;
+  end;
+
+  KeepUserDataOnUninstall := (Choice = IDYES);
+  Result := True;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  FailedPaths: string;
+  LocalDir: string;
+  RoamingDir: string;
+  InstallDir: string;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  if KeepUserDataOnUninstall then
+    Exit;
+
+  FailedPaths := '';
+  LocalDir := ExpandConstant('{localappdata}\YCB');
+  RoamingDir := ExpandConstant('{userappdata}\YCB');
+  InstallDir := ExpandConstant('{app}');
+
+  if not RemoveDirTreeIfPresent(LocalDir) then
+    FailedPaths := LocalDir;
+
+  if CompareText(LocalDir, RoamingDir) <> 0 then begin
+    if not RemoveDirTreeIfPresent(RoamingDir) then begin
+      if FailedPaths <> '' then
+        FailedPaths := FailedPaths + #13#10;
+      FailedPaths := FailedPaths + RoamingDir;
+    end;
+  end;
+
+  if not RemoveDirTreeIfPresent(InstallDir) then begin
+    if FailedPaths <> '' then
+      FailedPaths := FailedPaths + #13#10;
+    FailedPaths := FailedPaths + InstallDir;
+  end;
+
+  if FailedPaths <> '' then
+    MsgBox(
+      T('The following directories could not be removed completely, usually because files are still in use:',
+        'The following directories could not be removed completely, usually because files are still in use:') +
+      Chr(13) + Chr(10) + Chr(13) + Chr(10) + FailedPaths,
+      mbInformation,
+      MB_OK);
 end;
 
 
@@ -174,6 +305,52 @@ begin
     Result := Default;
 end;
 
+function FormatSizeText(const Size: Int64): string;
+var
+  Value: Extended;
+begin
+  if Size <= 0 then begin
+    Result := '0 B';
+    Exit;
+  end;
+
+  Value := Size;
+  if Value < 1024 then
+    Result := IntToStr(Size) + ' B'
+  else if Value < 1024 * 1024 then
+    Result := Format('%.1f KB', [Value / 1024.0])
+  else if Value < 1024 * 1024 * 1024 then
+    Result := Format('%.1f MB', [Value / 1024.0 / 1024.0])
+  else
+    Result := Format('%.1f GB', [Value / 1024.0 / 1024.0 / 1024.0]);
+end;
+
+function GetDetailedPhaseText(const PhaseName: string): string;
+begin
+  if PhaseName = 'prepare' then
+    Result := T('检查程序目录中的现有文件', 'Checking existing files in the app directory')
+  else if PhaseName = 'download' then
+    Result := T('联网下载组件文件', 'Downloading component files')
+  else if PhaseName = 'extract' then
+    Result := T('从压缩包提取可执行文件', 'Extracting executable from archive')
+  else if PhaseName = 'verify' then
+    Result := T('校验文件可用性与版本', 'Verifying file integrity and version')
+  else if PhaseName = 'done' then
+    Result := T('组件已完成安装', 'Component installation completed')
+  else if PhaseName = 'retry' then
+    Result := T('本次失败后准备重试', 'Preparing next retry after a failed attempt')
+  else if PhaseName = 'skipped_existing' then
+    Result := T('程序目录已存在可复用组件，跳过下载', 'Reusable component already exists in the app directory; download skipped')
+  else if PhaseName = 'finished' then
+    Result := T('所有选中组件处理完成', 'All selected components have been processed')
+  else if PhaseName = 'skipped_all' then
+    Result := T('本次未选择任何可选组件', 'No optional component was selected this time')
+  else if PhaseName = 'error' then
+    Result := T('当前组件处理失败', 'Current component processing failed')
+  else
+    Result := T('正在处理可选组件', 'Processing optional components');
+end;
+ 
 function GetDisplayComponentName(const ComponentName: string): string;
 begin
   if ComponentName = 'yt-dlp' then
@@ -229,6 +406,7 @@ var
   AttemptText: string;
   HeadlineText: string;
   BytesText: string;
+  DetailPhaseText: string;
   OverallProgress: Integer;
   ComponentProgress: Integer;
   CurrentBytes: Int64;
@@ -239,7 +417,7 @@ var
 begin
   if not FileExists(ProgressFilePath) then
     Exit;
-
+ 
   ComponentName := ReadIniValue(ProgressFilePath, 'progress', 'component', '-');
   DisplayComponentName := GetDisplayComponentName(ComponentName);
   PhaseName := ReadIniValue(ProgressFilePath, 'progress', 'phase', '-');
@@ -252,32 +430,37 @@ begin
   TotalBytes := StrToInt64Def(ReadIniValue(ProgressFilePath, 'progress', 'total_bytes', '0'), 0);
   ComponentIndex := StrToIntDef(ReadIniValue(ProgressFilePath, 'progress', 'component_index', '0'), 0);
   ComponentTotal := StrToIntDef(ReadIniValue(ProgressFilePath, 'progress', 'component_total', '0'), 0);
-
+ 
   if OverallProgress < 0 then OverallProgress := 0;
   if OverallProgress > 100 then OverallProgress := 100;
   if ComponentProgress < 0 then ComponentProgress := 0;
   if ComponentProgress > 100 then ComponentProgress := 100;
-
+ 
   HeadlineText := GetPhaseHeadline(PhaseName, DisplayComponentName);
-  if (CurrentBytes > 0) or (TotalBytes > 0) then
-    BytesText := Format('%s / %s', [IntToStr(CurrentBytes div 1024 div 1024) + ' MB', IntToStr(TotalBytes div 1024 div 1024) + ' MB'])
-  else
+  DetailPhaseText := GetDetailedPhaseText(PhaseName);
+  if (CurrentBytes > 0) or (TotalBytes > 0) then begin
+    if TotalBytes > 0 then
+      BytesText := Format('%s / %s', [FormatSizeText(CurrentBytes), FormatSizeText(TotalBytes)])
+    else
+      BytesText := Format('%s / ?', [FormatSizeText(CurrentBytes)]);
+  end else
     BytesText := T('暂无', 'N/A');
-
+ 
   DetailText :=
     HeadlineText + #13#10 +
     T('组件顺序: ', 'Component: ') + IntToStr(ComponentIndex) + '/' + IntToStr(ComponentTotal) + #13#10 +
     T('当前组件: ', 'Current Component: ') + DisplayComponentName + #13#10 +
+    T('当前阶段: ', 'Current Stage: ') + DetailPhaseText + #13#10 +
     T('阶段标识: ', 'Phase: ') + PhaseName + #13#10 +
     T('单组件进度: ', 'Component Progress: ') + IntToStr(ComponentProgress) + '%' + #13#10 +
     T('总体进度: ', 'Overall Progress: ') + IntToStr(OverallProgress) + '%' + #13#10 +
     T('下载大小: ', 'Downloaded Size: ') + BytesText + #13#10 +
     T('重试次数: ', 'Retry Count: ') + AttemptText + #13#10 +
     T('状态说明: ', 'Status: ') + MessageText;
-
+ 
   InstallProgressPage.SetText(HeadlineText, DetailText);
   InstallProgressPage.SetProgress(OverallProgress, 100);
-
+ 
   if (MessageText <> '') and (MessageText <> LastProgressMessage) then
     LastProgressMessage := MessageText;
 end;

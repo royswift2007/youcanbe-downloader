@@ -75,7 +75,7 @@ class ComponentsCenterWindow:
         ttk.Button(
             btn_row,
             text=self.app.get_text("components_update_ytdlp"),
-            command=lambda: update_components(self.app, self.app.base_path),
+            command=lambda: update_components(self.app, getattr(self.app, "components_dir", self.app.base_path)),
             style="Small.TButton",
         ).pack(side='left', padx=(8, 0))
         ttk.Button(

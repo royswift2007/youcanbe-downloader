@@ -5,6 +5,8 @@ import sqlite3
 import threading
 import time
 
+from core.settings import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 STATUS_SUCCESS = "完成"
@@ -318,8 +320,7 @@ class YouTubeHistoryRepository:
         return normalized_data
 
     def _write_json_history(self, history_data):
-        with open(self.history_file, "w", encoding="utf-8") as f:
-            json.dump(history_data, f, ensure_ascii=False, indent=2)
+        write_json_atomic(self.history_file, history_data)
 
     def _save_json_item(self, history_item):
         with self._json_lock:

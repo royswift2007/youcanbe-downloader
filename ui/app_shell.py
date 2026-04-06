@@ -162,13 +162,15 @@ class TopBar(ttk.Frame):
         browser = (getattr(self.app, 'default_browser_cookies', '') or '').strip()
 
         if diagnostic and not diagnostic.ok:
-            return self.app.get_text("topbar_auth_error").format(summary=diagnostic.summary)
+            summary = self.app.get_text(getattr(diagnostic, 'summary', '') or '', getattr(diagnostic, 'summary', '') or '')
+            return self.app.get_text("topbar_auth_error").format(summary=summary)
         if mode == "browser":
             return self.app.get_text("topbar_auth_browser").format(browser=browser or "-")
         if exists:
             return self.app.get_text("topbar_auth_file_configured")
         if status and getattr(status, 'last_message', ''):
-            return self.app.get_text("topbar_auth_last_message").format(message=status.last_message)
+            message = self.app.get_text(getattr(status, 'last_message', '') or '', getattr(status, 'last_message', '') or '')
+            return self.app.get_text("topbar_auth_last_message").format(message=message)
         return self.app.get_text("topbar_auth_unconfigured")
 
     def _build_runtime_text(self):

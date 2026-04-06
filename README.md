@@ -9,8 +9,6 @@ A desktop YouTube downloader and local media toolkit built on `yt-dlp` + `ffmpeg
 - **Platform**: Windows (this repo ships `.exe` components)
 
 > 中文版说明: [`README_zh.md`](README_zh.md)
->
-> In-Depth User Guide and Feature Manual：[`usage_intro_en.md`](usage_intro_en.md)
 
 > [!IMPORTANT]
 > On first launch, go to **Settings → Components** and click **Component Update (yt-dlp/ffmpeg/deno)** first.
@@ -183,7 +181,7 @@ Quick entries: Auth status / History / Components / Runtime / Usage
 
 - **Cookies file**: default `www.youtube.com_cookies.txt` (Netscape format)
 - **Browser Cookies**: Chrome / Edge / Firefox
-- **PO Token**: requires Node.js (>=16 recommended)
+- **PO Token**: requires Node.js (>=18 recommended)
 
 ---
 

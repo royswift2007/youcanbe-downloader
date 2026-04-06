@@ -119,6 +119,29 @@ class MediaJobManager:
     def log(self, message, level="INFO"):
         self.log_queue.put((message, level))
 
+    def _queue_log(self, tag_key, message_key, fallback, level="INFO", **kwargs):
+        tag = self.app.get_text(tag_key, "")
+        message = self.app.get_text(message_key, fallback).format(**kwargs)
+        prefix = f"[{tag}] " if tag else ""
+        self.log(f"{prefix}{message}", level)
+
+    def _job_display_name(self, job):
+        job_type = getattr(getattr(job, "profile", None), "job_type", "") or getattr(job, "job_type", "")
+        key_map = {
+            MEDIA_JOB_REMUX: "media_job_type_remux",
+            MEDIA_JOB_EXTRACT_AUDIO: "media_job_type_extract_audio",
+            MEDIA_JOB_TRIM: "media_job_type_trim",
+            MEDIA_JOB_CONCAT: "media_job_type_concat",
+            MEDIA_JOB_BURN_SUBTITLE: "media_job_type_burn_subtitle",
+            MEDIA_JOB_SCALE: "media_job_type_scale",
+            MEDIA_JOB_CROP: "media_job_type_crop",
+            MEDIA_JOB_ROTATE: "media_job_type_rotate",
+            MEDIA_JOB_WATERMARK: "media_job_type_watermark",
+            MEDIA_JOB_LOUDNORM: "media_job_type_loudnorm",
+        }
+        key = key_map.get(job_type, "media_job_type_default")
+        return self.app.get_text(key)
+
     def _safe_after(self, delay_ms, callback, *args):
         root = getattr(self.app, "root", None)
         if not root or not callback:
@@ -126,7 +149,7 @@ class MediaJobManager:
         try:
             root.after(delay_ms, callback, *args)
         except Exception as exc:
-            self.log(f"[警告] 媒体 UI 调度失败: {exc}", "WARN")
+            self.log(self.app.get_text("media_log_ui_schedule_failed").format(error=exc), "WARN")
 
     def process_log_queue(self):
         if self.log_text is None:
@@ -165,22 +188,22 @@ class MediaJobManager:
                     job.status,
                     job.progress,
                     job.speed,
-                    job.get_display_name(),
+                    self._job_display_name(job),
                 ),
             )
 
     def add_job(self, job):
         with self._state_lock:
             if any(getattr(existing, 'id', None) == job.id for existing in self.job_queue):
-                self.log(f"[警告] 已存在同 ID 等待任务，已跳过: [{job.id}]", "WARN")
+                self._queue_log("queue_log_tag_warn", "media_log_duplicate_waiting_job", "已存在同 ID 等待任务，已跳过: [{job_id}]", "WARN", job_id=job.id)
                 return False
             if job.id in self.running_jobs:
-                self.log(f"[警告] 任务正在运行中，已跳过: [{job.id}]", "WARN")
+                self._queue_log("queue_log_tag_warn", "media_log_duplicate_running_job", "任务正在运行中，已跳过: [{job_id}]", "WARN", job_id=job.id)
                 return False
             self.job_queue.append(job)
         self.update_list()
         add_time_str = time.strftime("%H:%M:%S", time.localtime(job.profile.add_time))
-        self.log(f"[添加] 媒体任务已入队 | 时间: {add_time_str} | 类型: {job.get_display_name()}", "INFO")
+        self._queue_log("queue_log_tag_add", "media_log_job_added", "媒体任务已入队 | 时间: {time} | 类型: {name}", "INFO", time=add_time_str, name=self._job_display_name(job))
         return True
 
     def start_next_job(self):
@@ -202,9 +225,9 @@ class MediaJobManager:
         with self._state_lock:
             waiting_count = sum(1 for j in self.job_queue if j.status == MEDIA_JOB_STATUS_WAITING)
         if waiting_count == 0:
-            self.log("没有等待中的媒体任务", "INFO")
+            self.log(self.app.get_text("media_log_no_waiting_jobs"), "INFO")
             return
-        self.log(f"[开始] 启动 {waiting_count} 个媒体任务...", "INFO")
+        self._queue_log("queue_log_tag_run", "media_log_starting_waiting_jobs", "启动 {count} 个媒体任务...", "INFO", count=waiting_count)
         while True:
             with self._state_lock:
                 if len(self.running_jobs) >= self.max_concurrent:
@@ -216,7 +239,7 @@ class MediaJobManager:
         job.status = MEDIA_JOB_STATUS_RUNNING
         job.start_time = time.time()
         start_time_str = time.strftime("%H:%M:%S", time.localtime(job.start_time))
-        self.log(f"[运行] 媒体任务开始 | 时间: {start_time_str} | 类型: {job.get_display_name()}", "INFO")
+        self._queue_log("queue_log_tag_run", "media_log_job_started", "媒体任务开始 | 时间: {time} | 类型: {name}", "INFO", time=start_time_str, name=self._job_display_name(job))
         self._safe_after(0, self.update_list)
         self._run_ffmpeg_job(job)
         with self._state_lock:
@@ -241,15 +264,15 @@ class MediaJobManager:
                     try:
                         proc.wait(timeout=kill_timeout)
                     except Exception as exc:
-                        self.log(f"[警告] 等待媒体进程终止超时: {exc}", "WARN")
+                        self._queue_log("queue_log_tag_warn", "media_log_wait_process_exit_timeout", "等待媒体进程终止超时: {error}", "WARN", error=exc)
         except Exception as exc:
-            self.log(f"[警告] 媒体进程清理失败: {exc}", "WARN")
+            self._queue_log("queue_log_tag_warn", "media_log_process_cleanup_failed", "媒体进程清理失败: {error}", "WARN", error=exc)
         finally:
             try:
                 if proc.stdout:
                     proc.stdout.close()
             except Exception as exc:
-                self.log(f"[警告] 关闭媒体进程输出流失败: {exc}", "WARN")
+                self._queue_log("queue_log_tag_warn", "media_log_stdout_close_failed", "关闭媒体进程输出流失败: {error}", "WARN", error=exc)
             job.process = None
 
     def _run_ffmpeg_job(self, job):
@@ -258,11 +281,11 @@ class MediaJobManager:
         except Exception as exc:
             job.status = MEDIA_JOB_STATUS_FAILED
             job.end_time = time.time()
-            job.latest_error_summary = f"命令构建失败: {exc}"
-            self.log(f"[错误] 媒体任务命令构建失败: {exc}", "ERROR")
+            job.latest_error_summary = self.app.get_text("media_log_command_build_failed").format(error=exc)
+            self._queue_log("queue_log_tag_error", "media_log_command_build_failed", "媒体任务命令构建失败: {error}", "ERROR", error=exc)
             return
 
-        self.log(f"[摘要] ffmpeg 命令: {' '.join(cmd[:8])}{' ...' if len(cmd) > 8 else ''}", "INFO")
+        self._queue_log("queue_log_tag_summary", "media_log_ffmpeg_command", "ffmpeg 命令: {preview}", "INFO", preview=f"{' '.join(cmd[:8])}{' ...' if len(cmd) > 8 else ''}")
 
         output_dir = job.resolve_output_dir()
         if output_dir:
@@ -293,7 +316,7 @@ class MediaJobManager:
                     error_lines = error_lines[-6:]
             if job.stop_flag:
                 job.status = MEDIA_JOB_STATUS_STOPPED
-                self.log(f"[停止] 媒体任务已停止: [{job.id}]", "INFO")
+                self._queue_log("queue_log_tag_stop", "media_log_job_stopped", "媒体任务已停止: [{job_id}]", "INFO", job_id=job.id)
                 return
 
             return_code = job.process.wait()
@@ -302,18 +325,18 @@ class MediaJobManager:
                 job.end_time = time.time()
                 duration = job.end_time - (job.start_time or job.profile.add_time)
                 end_time_str = time.strftime("%H:%M:%S", time.localtime(job.end_time))
-                self.log(f"[完成] 媒体任务完成 | 时间: {end_time_str} | 耗时: {duration:.1f}秒", "INFO")
+                self._queue_log("queue_log_tag_done", "media_log_job_completed", "媒体任务完成 | 时间: {time} | 耗时: {duration}秒", "INFO", time=end_time_str, duration=f"{duration:.1f}")
                 return
 
             job.status = MEDIA_JOB_STATUS_FAILED
             job.end_time = time.time()
             job.latest_error_summary = (error_lines[-1] if error_lines else f"ffmpeg 退出码 {return_code}")
-            self.log(f"[错误] 媒体任务失败: {job.latest_error_summary}", "ERROR")
+            self._queue_log("queue_log_tag_error", "media_log_job_failed", "媒体任务失败: {summary}", "ERROR", summary=job.latest_error_summary)
         except Exception as exc:
             job.status = MEDIA_JOB_STATUS_FAILED
             job.end_time = time.time()
             job.latest_error_summary = str(exc)[:300]
-            self.log(f"[错误] 媒体任务异常: {exc}", "ERROR")
+            self._queue_log("queue_log_tag_error", "media_log_job_exception", "媒体任务异常: {error}", "ERROR", error=exc)
         finally:
             self._cleanup_job_process(job)
 
@@ -333,10 +356,10 @@ class MediaJobManager:
                     timeout=10,
                 )
             except Exception as exc:
-                self.log(f"终止媒体进程时出错: {exc}", "WARN")
+                self.log(self.app.get_text("media_log_terminate_process_error").format(error=exc), "WARN")
             finally:
                 self._cleanup_job_process(job)
-        self.log(f"正在停止媒体任务: [{job.id}]", "INFO")
+        self._queue_log("queue_log_tag_stop", "media_log_stopping_job", "正在停止媒体任务: [{job_id}]", "INFO", job_id=job.id)
         return
 
     def stop_selected(self, job_tree):

@@ -7,10 +7,12 @@ import subprocess
 import threading
 import time
 from dataclasses import fields as dataclass_fields
+from urllib.parse import urlparse
 
 from core.history_repo import YouTubeHistoryRepository
 from core.hooks import HookDispatcher, HOOK_EVENT_TASK_ADDED, HOOK_EVENT_TASK_COMPLETED, HOOK_EVENT_TASK_FAILED
 from core.log_sink import LogFileSink
+from core.settings import write_json_atomic
 from core.youtube_metadata import detect_auth_diagnostic
 from core.youtube_models import (
     AUDIO_FMT,
@@ -103,14 +105,14 @@ class YouTubeDownloadManager:
         elif self.history_repo.db_available:
             self.log_queue.put((self.app.get_text("runtime_history_db_enabled").format(path=self.history_repo.db_path), "INFO"))
 
-        self.log_queue.put(("YCB Downloader 启动", "INFO"))
-        self.log_queue.put((f"history_file={history_file}", "INFO"))
+        self.log_queue.put((self.app.get_text("runtime_app_started"), "INFO"))
+        self.log_queue.put((self.app.get_text("runtime_history_file").format(path=history_file), "INFO"))
         if self.yt_dlp_path:
-            self.log_queue.put((f"yt_dlp_path={self.yt_dlp_path}", "INFO"))
+            self.log_queue.put((self.app.get_text("runtime_yt_dlp_path").format(path=self.yt_dlp_path), "INFO"))
         if self.ffmpeg_path:
-            self.log_queue.put((f"ffmpeg_path={self.ffmpeg_path}", "INFO"))
+            self.log_queue.put((self.app.get_text("runtime_ffmpeg_path").format(path=self.ffmpeg_path), "INFO"))
         if self.cookies_file_path:
-            self.log_queue.put((f"cookies_file={self.cookies_file_path}", "INFO"))
+            self.log_queue.put((self.app.get_text("runtime_cookies_file").format(path=self.cookies_file_path), "INFO"))
 
     def log(self, message, level="INFO"):
         """写入日志队列。"""
@@ -120,6 +122,18 @@ class YouTubeDownloadManager:
         except Exception as exc:
             self.log_queue.put((self.app.get_text("runtime_log_write_failed").format(error=exc), "WARN"))
 
+    def _queue_log(self, tag_key, message_key, fallback, level="INFO", **kwargs):
+        tag = self.app.get_text(tag_key, "")
+        message = self.app.get_text(message_key, fallback).format(**kwargs)
+        prefix = f"[{tag}] " if tag else ""
+        self.log(f"{prefix}{message}", level)
+
+    def _runtime_text(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return self.app.get_text(text, text)
+
     def save_pending_tasks(self):
         """保存等待中/运行中的任务快照，用于下次启动恢复。"""
         try:
@@ -128,10 +142,9 @@ class YouTubeDownloadManager:
                 if os.path.exists(self.pending_queue_path):
                     os.remove(self.pending_queue_path)
                 return
-            with open(self.pending_queue_path, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+            write_json_atomic(self.pending_queue_path, snapshot)
         except Exception as exc:
-            self.log_queue.put((f"[WARN] 待恢复任务保存失败: {exc}", "WARN"))
+            self.log_queue.put((self.app.get_text("runtime_pending_tasks_save_failed").format(error=exc), "WARN"))
 
     def load_pending_tasks(self):
         """加载上次未完成任务并恢复到等待队列。"""
@@ -141,6 +154,7 @@ class YouTubeDownloadManager:
             with open(self.pending_queue_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             tasks = self._restore_pending_tasks(payload)
+            restored_count = 0
             if tasks:
                 with self._state_lock:
                     existing_ids = {getattr(t, "id", "") for t in self.task_queue}
@@ -148,20 +162,18 @@ class YouTubeDownloadManager:
                     for task in tasks:
                         if not getattr(task, "id", "") or task.id in existing_ids:
                             continue
-                        task.status = TASK_STATUS_WAITING
-                        task.progress = "0%"
-                        task.speed = "0 M/s"
                         task.stop_flag = False
+                        if (task.archive_root or task.archive_subdir) and not task.save_path:
+                            task.save_path = task.resolve_output_dir() or task.save_path
                         if not task.save_path:
                             task.save_path = getattr(self.app, "shared_save_dir_var", None).get() if getattr(self.app, "shared_save_dir_var", None) else ""
-                        if task.archive_root or task.archive_subdir:
-                            task.save_path = task.resolve_output_dir() or task.save_path
                         self.task_queue.append(task)
+                        restored_count += 1
             os.remove(self.pending_queue_path)
             self._safe_after(0, self.update_list)
-            return len(tasks)
+            return restored_count
         except Exception as exc:
-            self.log_queue.put((f"[WARN] 待恢复任务加载失败: {exc}", "WARN"))
+            self.log_queue.put((self.app.get_text("runtime_pending_tasks_load_failed").format(error=exc), "WARN"))
             return 0
 
     def _build_pending_snapshot(self):
@@ -202,6 +214,10 @@ class YouTubeDownloadManager:
             "archive_root": getattr(task, "archive_root", ""),
             "archive_subdir": getattr(task, "archive_subdir", ""),
             "add_time": float(getattr(task, "add_time", 0.0) or 0.0),
+            "status": getattr(task, "status", TASK_STATUS_WAITING),
+            "progress": getattr(task, "progress", "0%"),
+            "speed": getattr(task, "speed", "0 M/s"),
+            "start_time": getattr(task, "start_time", None),
             "profile": profile_data,
         }
 
@@ -236,6 +252,19 @@ class YouTubeDownloadManager:
             task.upload_date = item.get("upload_date") or ""
             task.archive_root = item.get("archive_root") or ""
             task.archive_subdir = item.get("archive_subdir") or ""
+            original_status = item.get("status") or TASK_STATUS_WAITING
+            task.progress = item.get("progress") or task.progress
+            task.speed = item.get("speed") or task.speed
+            task.start_time = item.get("start_time")
+            setattr(task, "restored_from_status", original_status)
+            setattr(task, "restored_from_snapshot", True)
+            if original_status == TASK_STATUS_RUNNING:
+                task.status = TASK_STATUS_WAITING
+                restore_message = "上次退出时任务处于下载中，已恢复为等待中，可重新启动。"
+                task.latest_error_summary = task.latest_error_summary or restore_message[:300]
+                task.latest_error_detail = task.latest_error_detail or restore_message
+            else:
+                task.status = original_status
             try:
                 task.add_time = float(item.get("add_time", task.add_time) or task.add_time)
             except (TypeError, ValueError):
@@ -272,7 +301,7 @@ class YouTubeDownloadManager:
                     message = message.decode('utf-8', errors='replace')
                 else:
                     message = str(message)
-                display_level = "SUMMARY" if "[摘要]" in message else level
+                display_level = "SUMMARY" if ("[摘要]" in message or "[Summary]" in message) else level
                 self.log_text.insert("end", f"{message}\n", display_level)
                 self.log_text.see("end")
         except queue.Empty:
@@ -363,7 +392,7 @@ class YouTubeDownloadManager:
                     return
             self.app.root.after(delay_ms, callback, *args)
         except Exception as exc:
-            self.log_queue.put((f"[WARN] UI 调度失败: {exc}", "WARN"))
+            self.log_queue.put((self.app.get_text("runtime_ui_schedule_failed").format(error=exc), "WARN"))
 
     def _refresh_history_ui(self):
         try:
@@ -373,7 +402,7 @@ class YouTubeDownloadManager:
             if history_page and hasattr(history_page, "refresh"):
                 history_page.refresh()
         except Exception as exc:
-            self.log_queue.put((f"[WARN] 历史记录 UI 刷新失败: {exc}", "WARN"))
+            self.log_queue.put((self.app.get_text("runtime_history_ui_refresh_failed").format(error=exc), "WARN"))
 
     def _parse_progress_value(self, progress_text):
         text = str(progress_text or "").strip()
@@ -443,21 +472,21 @@ class YouTubeDownloadManager:
         """添加任务到等待队列。"""
         with self._state_lock:
             if any(getattr(existing, 'id', None) == task.id for existing in self.task_queue):
-                self.log(f"[警告] 已存在同 ID 等待任务，已跳过重复入队: [{task.id}]", "WARN")
+                self._queue_log("queue_log_tag_warn", "queue_log_duplicate_waiting_task", "已存在同 ID 等待任务，已跳过重复入队: [{task_id}]", "WARN", task_id=task.id)
                 return False
             if task.id in self.running_tasks:
-                self.log(f"[警告] 任务正在运行中，已跳过重复入队: [{task.id}]", "WARN")
+                self._queue_log("queue_log_tag_warn", "queue_log_duplicate_running_task", "任务正在运行中，已跳过重复入队: [{task_id}]", "WARN", task_id=task.id)
                 return False
             self.task_queue.append(task)
         self.update_list()
         add_time_str = time.strftime("%H:%M:%S", time.localtime(task.add_time))
-        self.log(f"[添加] 任务已添加到队列 | 时间: {add_time_str}", "INFO")
-        self.log(f" 链接: {task.url}", "INFO")
-        self.log(f" 标题: {task.get_display_name()}", "INFO")
+        self._queue_log("queue_log_tag_add", "queue_log_task_added", "任务已添加到队列 | 时间: {time}", "INFO", time=add_time_str)
+        self.log(f" {self.app.get_text('queue_log_link', '链接: {url}').format(url=task.url)}", "INFO")
+        self.log(f" {self.app.get_text('queue_log_title', '标题: {title}').format(title=task.get_display_name())}", "INFO")
         try:
             self.hook_dispatcher.emit(HOOK_EVENT_TASK_ADDED, task)
         except Exception as exc:
-            self.log(f"[警告] 任务添加 Hook 执行失败: {exc}", "WARN")
+            self._queue_log("queue_log_tag_warn", "queue_log_task_added_hook_failed", "任务添加 Hook 执行失败: {error}", "WARN", error=exc)
         return True
 
     def start_next_task(self):
@@ -500,9 +529,9 @@ class YouTubeDownloadManager:
         with self._state_lock:
             waiting_count = sum(1 for t in self.task_queue if t.status == TASK_STATUS_WAITING)
         if waiting_count == 0:
-            self.log("没有等待中的任务", "INFO")
+            self.log(self.app.get_text("queue_log_no_waiting_tasks", "没有等待中的任务"), "INFO")
             return
-        self.log(f"[开始] 开始启动 {waiting_count} 个等待中的任务...", "INFO")
+        self._queue_log("queue_log_tag_run", "queue_log_starting_waiting_tasks", "开始启动 {count} 个等待中的任务...", "INFO", count=waiting_count)
         while True:
             with self._state_lock:
                 if len(self.running_tasks) >= self.max_concurrent:
@@ -515,8 +544,8 @@ class YouTubeDownloadManager:
         task.status = TASK_STATUS_RUNNING
         task.start_time = time.time()
         start_time_str = time.strftime("%H:%M:%S", time.localtime(task.start_time))
-        self.log(f"[运行] 任务开始运行 | 时间: {start_time_str}", "INFO")
-        self.log(f" 标题: {task.get_display_name()}", "INFO")
+        self._queue_log("queue_log_tag_run", "queue_log_task_started", "任务开始运行 | 时间: {time}", "INFO", time=start_time_str)
+        self.log(f" {self.app.get_text('queue_log_title', '标题: {title}').format(title=task.get_display_name())}", "INFO")
         
         self._safe_after(0, self.update_list)
         self._run_ytdlp_task(task)
@@ -543,15 +572,18 @@ class YouTubeDownloadManager:
             try:
                 cookies_status.update_from_diagnostic(diagnostic, used_cookies=used_cookies)
             except Exception as exc:
-                self.log(f"[警告] 认证状态同步失败: {exc}", "WARN")
+                self._queue_log("queue_log_tag_warn", "queue_log_auth_sync_failed", "认证状态同步失败: {error}", "WARN", error=exc)
+        summary_text = self._runtime_text(diagnostic.summary or self.app.get_text("queue_log_auth_issue_detected"))
+        action_hint_text = self._runtime_text(getattr(diagnostic, "action_hint", ""))
+        detail_text = self._runtime_text(getattr(diagnostic, "detail", "")) or action_hint_text or summary_text
         self.record_runtime_issue(
-            diagnostic.summary or "检测到认证问题",
-            getattr(diagnostic, "detail", "") or getattr(diagnostic, "action_hint", "") or diagnostic.summary,
+            summary_text or self.app.get_text("queue_log_auth_issue_detected"),
+            detail_text,
             level="ERROR" if diagnostic.is_auth_related else "WARN",
         )
-        self.log(f"[错误] {diagnostic.summary}", "ERROR" if diagnostic.is_auth_related else "WARN")
-        if diagnostic.action_hint:
-            self.log(f"[提示] {diagnostic.action_hint}", "ERROR" if diagnostic.is_auth_related else "WARN")
+        self.log(f"[{self.app.get_text('queue_log_tag_error', '错误')}] {summary_text}", "ERROR" if diagnostic.is_auth_related else "WARN")
+        if action_hint_text:
+            self.log(f"[{self.app.get_text('queue_log_tag_hint', '提示')}] {action_hint_text}", "ERROR" if diagnostic.is_auth_related else "WARN")
         if diagnostic.is_auth_related:
             self._safe_after(0, lambda diag=diagnostic: self.app.notify_cookies_error(diag))
             top_bar = getattr(self.app, "top_bar", None)
@@ -567,20 +599,20 @@ class YouTubeDownloadManager:
             return diagnostic
 
         if any(token in raw_text for token in ("http error 407", "proxy authentication required", "proxyconnect", "proxy tunnel request failed")):
-            diagnostic.summary = "检测到代理鉴权或代理连接失败"
-            diagnostic.action_hint = "请检查代理账号密码、协议头与端口；确认代理地址格式为 http:// 或 socks5://，必要时先关闭代理直连验证。"
+            diagnostic.summary = "runtime_diag_proxy_auth_summary"
+            diagnostic.action_hint = "runtime_diag_proxy_auth_hint"
             return diagnostic
         if any(token in raw_text for token in ("name resolution", "getaddrinfo failed", "failed to resolve", "temporary failure in name resolution")):
-            diagnostic.summary = "检测到 DNS 解析失败"
-            diagnostic.action_hint = "请检查 DNS 配置和网络连通性；可先测试系统是否能解析目标域名，再重试下载。"
+            diagnostic.summary = "runtime_diag_dns_summary"
+            diagnostic.action_hint = "runtime_diag_dns_hint"
             return diagnostic
         if any(token in raw_text for token in ("ssl", "tls", "certificate verify failed", "ssl handshake failed")):
-            diagnostic.summary = "检测到 TLS/SSL 握手或证书问题"
-            diagnostic.action_hint = "请检查系统时间、证书链与代理中间人设置；必要时更换网络环境后重试。"
+            diagnostic.summary = "runtime_diag_tls_summary"
+            diagnostic.action_hint = "runtime_diag_tls_hint"
             return diagnostic
         if any(token in raw_text for token in ("timed out", "read timed out", "connection reset", "connection aborted", "connection refused", "network is unreachable")):
-            diagnostic.summary = "检测到网络连接超时或中断"
-            diagnostic.action_hint = "请检查网络稳定性与超时参数后重试。"
+            diagnostic.summary = "runtime_diag_network_timeout_summary"
+            diagnostic.action_hint = "runtime_diag_network_timeout_hint"
             return diagnostic
         return diagnostic
 
@@ -617,34 +649,55 @@ class YouTubeDownloadManager:
                 safe_preview = f"{safe_preview} ..."
             summary["command_preview"] = safe_preview
         return summary
+ 
+    def _mask_proxy_url_for_log(self, value):
+        text = (value or "").strip()
+        if not text:
+            return ""
+        try:
+            parsed = urlparse(text)
+            scheme = (parsed.scheme or "proxy").strip()
+            host = (parsed.hostname or "").strip()
+            port = parsed.port
+            if host:
+                host_label = host if len(host) <= 8 else f"{host[:4]}...{host[-2:]}"
+                if port:
+                    return f"{scheme}://{host_label}:{port}"
+                return f"{scheme}://{host_label}"
+        except Exception:
+            pass
+        return "configured"
+
+    def _mask_browser_for_log(self, value):
+        text = (value or "").strip().lower()
+        return text if text in {"chrome", "edge", "firefox"} else "configured"
+
+    def _mask_advanced_args_for_log(self, value):
+        text = (value or "").strip()
+        if not text:
+            return ""
+        token_count = len(text.split())
+        return f"configured({token_count} tokens)"
 
     def _log_command_summary(self, task, output_dir, command):
         summary = self._build_command_summary(task, output_dir, command)
-        self.log("[摘要] 准备执行下载命令", "INFO")
-        self.log(
-            "[摘要] task_id={task_id} | preset={preset_key} | format={format} | audio={audio_mode}".format(**summary),
-            "INFO",
-        )
-        self.log(f"[摘要] url={summary['url']}", "INFO")
-        self.log(
-            "[摘要] output={output_dir} | cookies={use_cookies} | po_token={use_po_token} | merge={merge_output_format}".format(
-                **summary
-            ),
-            "INFO",
-        )
+        self._queue_log("queue_log_tag_summary", "queue_log_prepare_command", "准备执行下载命令", "INFO")
+        self._queue_log("queue_log_tag_summary", "queue_log_summary_main", "task_id={task_id} | preset={preset_key} | format={format} | audio={audio_mode}", "INFO", **summary)
+        self._queue_log("queue_log_tag_summary", "queue_log_summary_url", "url={url}", "INFO", url=summary["url"])
+        self._queue_log("queue_log_tag_summary", "queue_log_summary_output", "output={output_dir} | cookies={use_cookies} | po_token={use_po_token} | merge={merge_output_format}", "INFO", **summary)
         if summary.get("custom_filename"):
-            self.log(f"[摘要] custom_filename={summary['custom_filename']}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_custom_filename", "custom_filename={custom_filename}", "INFO", custom_filename=summary["custom_filename"])
         if summary.get("download_sections"):
-            self.log(f"[摘要] sections={summary['download_sections']}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_sections", "sections={download_sections}", "INFO", download_sections=summary["download_sections"])
         if summary.get("sponsorblock_enabled"):
             categories = summary.get("sponsorblock_categories") or "sponsor"
-            self.log(f"[摘要] sponsorblock={categories}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_sponsorblock", "sponsorblock={categories}", "INFO", categories=categories)
         if summary.get("proxy_url"):
-            self.log(f"[摘要] proxy={summary['proxy_url']}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_proxy", "proxy={proxy}", "INFO", proxy=self._mask_proxy_url_for_log(summary["proxy_url"]))
         if summary.get("cookies_mode") == "browser" and summary.get("cookies_browser"):
-            self.log(f"[摘要] cookies_browser={summary['cookies_browser']}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_cookies_browser", "cookies_browser={cookies_browser}", "INFO", cookies_browser=self._mask_browser_for_log(summary["cookies_browser"]))
         if summary.get("advanced_args"):
-            self.log(f"[摘要] advanced_args={summary['advanced_args']}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_advanced_args", "advanced_args={advanced_args}", "INFO", advanced_args=self._mask_advanced_args_for_log(summary["advanced_args"]))
         extra_options = []
         if summary.get("speed_limit"):
             extra_options.append(f"speed_limit={summary['speed_limit']}M")
@@ -657,9 +710,9 @@ class YouTubeDownloadManager:
         if summary.get("sleep_requests"):
             extra_options.append(f"sleep_requests={summary['sleep_requests']}")
         if extra_options:
-            self.log(f"[摘要] options={', '.join(extra_options)}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_options", "options={options}", "INFO", options=", ".join(extra_options))
         if summary.get("command_preview"):
-            self.log(f"[摘要] cmd_preview={summary['command_preview']}", "INFO")
+            self._queue_log("queue_log_tag_summary", "queue_log_summary_cmd_preview", "cmd_preview={command_preview}", "INFO", command_preview=summary["command_preview"])
         return summary
 
     def _classify_failure_stage(self, error_output_buffer):
@@ -719,7 +772,7 @@ class YouTubeDownloadManager:
         section_value = getattr(task.profile, "download_sections", "") or ""
         start_time, end_time = self._parse_download_section_range(section_value)
         if not start_time or not end_time:
-            return False, "区段下载 fallback 无法解析时间范围"
+            return False, self.app.get_text("queue_log_section_fallback_parse_range_failed")
 
         temp_base = f"ycb_section_full_{task.id}"
         fallback_profile = copy.copy(task.profile)
@@ -740,11 +793,11 @@ class YouTubeDownloadManager:
         fallback_task.archive_root = getattr(task, "archive_root", "")
         fallback_task.archive_subdir = getattr(task, "archive_subdir", "")
 
-        self.log(f"[回退] 区段下载失败，尝试全量下载后本地裁剪: {start_time}-{end_time}", "WARN")
+        self._queue_log("queue_log_tag_fallback", "queue_log_section_fallback_start", "区段下载失败，尝试全量下载后本地裁剪: {range}", "WARN", range=f"{start_time}-{end_time}")
         if getattr(task.profile, "sponsorblock_enabled", False):
-            self.log("[回退] 为提高成功率，区段 fallback 阶段暂不附加 SponsorBlock", "WARN")
+            self._queue_log("queue_log_tag_fallback", "queue_log_section_fallback_no_sponsorblock", "为提高成功率，区段 fallback 阶段暂不附加 SponsorBlock", "WARN")
         if getattr(task.profile, "advanced_args", ""):
-            self.log("[回退] 为提高成功率，区段 fallback 阶段暂不附加高级参数", "WARN")
+            self._queue_log("queue_log_tag_fallback", "queue_log_section_fallback_no_advanced_args", "为提高成功率，区段 fallback 阶段暂不附加高级参数", "WARN")
 
         fallback_cmd = build_ytdlp_command(
             self.yt_dlp_path,
@@ -765,17 +818,17 @@ class YouTubeDownloadManager:
                 timeout=1200,
             )
         except subprocess.TimeoutExpired:
-            return False, "区段 fallback 全量下载超时"
+            return False, self.app.get_text("queue_log_section_fallback_download_timeout")
         except Exception as exc:
-            return False, f"区段 fallback 全量下载启动失败: {exc}"
+            return False, self.app.get_text("queue_log_section_fallback_download_start_failed").format(error=exc)
 
         if proc.returncode != 0:
             output = (proc.stdout or "").strip().replace("\r", " ").replace("\n", " ")
-            return False, f"区段 fallback 全量下载失败: {output[:220]}"
+            return False, self.app.get_text("queue_log_section_fallback_download_failed").format(output=output[:220])
 
         source_path = self._find_media_output(output_dir, temp_base)
         if not source_path:
-            return False, "区段 fallback 未找到全量下载输出文件"
+            return False, self.app.get_text("queue_log_section_fallback_output_missing")
 
         final_base_raw = task.profile.custom_filename or (task.final_title or f"section_{task.id}")
         final_base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', final_base_raw).strip(' .')
@@ -810,13 +863,13 @@ class YouTubeDownloadManager:
                 timeout=600,
             )
         except subprocess.TimeoutExpired:
-            return False, "区段 fallback 裁剪超时"
+            return False, self.app.get_text("queue_log_section_fallback_cut_timeout")
         except Exception as exc:
-            return False, f"区段 fallback 裁剪失败: {exc}"
+            return False, self.app.get_text("queue_log_section_fallback_cut_failed").format(error=exc)
 
         if cut_proc.returncode != 0:
             output = (cut_proc.stdout or "").strip().replace("\r", " ").replace("\n", " ")
-            return False, f"区段 fallback FFmpeg 裁剪失败: {output[:220]}"
+            return False, self.app.get_text("queue_log_section_fallback_ffmpeg_cut_failed").format(output=output[:220])
 
         try:
             if os.path.exists(source_path):
@@ -825,7 +878,7 @@ class YouTubeDownloadManager:
             pass
 
         task.archive_output_path = output_dir
-        self.log(f"[完成] 区段 fallback 裁剪成功: {os.path.basename(target_path)}")
+        self._queue_log("queue_log_tag_done", "queue_log_section_fallback_success", "区段 fallback 裁剪成功: {filename}", "INFO", filename=os.path.basename(target_path))
         return True, ""
 
     def _cleanup_task_process(self, task, kill_timeout=3):
@@ -842,78 +895,66 @@ class YouTubeDownloadManager:
                     try:
                         proc.wait(timeout=kill_timeout)
                     except Exception as exc:
-                        self.log(f"[警告] 进程等待终止超时: {exc}", "WARN")
+                        self._queue_log("queue_log_tag_warn", "queue_log_process_wait_terminate_timeout", "进程等待终止超时: {error}", "WARN", error=exc)
         except Exception as exc:
-            self.log(f"[警告] 进程清理失败: {exc}", "WARN")
+            self._queue_log("queue_log_tag_warn", "queue_log_process_cleanup_failed", "进程清理失败: {error}", "WARN", error=exc)
         finally:
             try:
                 if proc.stdout:
                     proc.stdout.close()
             except Exception as exc:
-                self.log(f"[警告] 进程输出流关闭失败: {exc}", "WARN")
+                self._queue_log("queue_log_tag_warn", "queue_log_process_stdout_close_failed", "进程输出流关闭失败: {error}", "WARN", error=exc)
             task.process = None
 
     def _prepare_task_title(self, task):
         if task.profile.custom_filename:
             task.final_title = task.profile.custom_filename
-            self.log(f"[完成] 使用自定义文件名: {task.final_title}", "INFO")
+            self._queue_log("queue_log_tag_done", "queue_log_custom_filename_used", "使用自定义文件名: {title}", "INFO", title=task.final_title)
             return
         if task.final_title or task.stop_flag:
             return
 
-        self.log(f"[获取] 正在获取标题: [{task.id}]", "INFO")
+        self._queue_log("queue_log_tag_fetch", "queue_log_fetch_title_start", "正在获取标题: [{task_id}]", "INFO", task_id=task.id)
         try:
             title_result = self.app.metadata_service.fetch_title(task.url)
             if title_result["used_cookies"]:
                 task.needs_cookies = True
-                self.log("[完成] 已使用 cookies 成功获取标题", "INFO")
+                self._queue_log("queue_log_tag_done", "queue_log_fetch_title_with_cookies", "已使用 cookies 成功获取标题", "INFO")
             else:
-                self.log("[信息] 标题获取未使用 cookies", "INFO")
+                self._queue_log("queue_log_tag_info", "queue_log_fetch_title_without_cookies", "标题获取未使用 cookies", "INFO")
             if title_result["returncode"] != 0:
-                self.log("[警告] 标题获取失败，将记录诊断信息并继续进入下载阶段", "WARN")
+                self._queue_log("queue_log_tag_warn", "queue_log_fetch_title_failed_continue", "标题获取失败，将记录诊断信息并继续进入下载阶段", "WARN")
 
             diagnostic = title_result.get("auth_diagnostic")
             if diagnostic and not diagnostic.ok:
                 if getattr(diagnostic, "is_auth_related", False):
                     self._notify_auth_issue(diagnostic, used_cookies=task.needs_cookies)
                 elif getattr(diagnostic, "summary", ""):
-                    self.log(f"[警告] {diagnostic.summary}", "WARN")
+                    self.log(f"[{self.app.get_text('queue_log_tag_warn', '警告')}] {self._runtime_text(diagnostic.summary)}", "WARN")
                     if getattr(diagnostic, "action_hint", ""):
-                        self.log(f"[提示] {diagnostic.action_hint}", "WARN")
+                        self.log(f"[{self.app.get_text('queue_log_tag_hint', '提示')}] {self._runtime_text(diagnostic.action_hint)}", "WARN")
                     if getattr(diagnostic, "detail", ""):
                         detail_preview = diagnostic.detail.strip().replace("\r", " ").replace("\n", " ")
-                        self.log(f"[诊断] 标题获取诊断: {detail_preview[:180]}")
+                        self._queue_log("queue_log_tag_diagnostic", "queue_log_title_fetch_diagnostic", "标题获取诊断: {detail}", "INFO", detail=detail_preview[:180])
 
             if title_result["ok"] and title_result["title"]:
                 task.final_title = title_result["title"]
-                self.log(f"[完成] 标题获取成功: [{task.id}] {task.final_title[:40]}...", "INFO")
+                self._queue_log("queue_log_tag_done", "queue_log_title_fetch_success", "标题获取成功: [{task_id}] {title}", "INFO", task_id=task.id, title=f"{task.final_title[:40]}...")
             else:
                 task.final_title = task.get_display_name()
                 error_out = title_result["error_output"]
-                self.log(f"[错误] 获取标题失败 (码:{title_result['returncode']}),输出: {error_out.strip()[:60]}...", "ERROR")
+                self._queue_log("queue_log_tag_error", "queue_log_title_fetch_failed", "获取标题失败 (码:{code}),输出: {output}", "ERROR", code=title_result["returncode"], output=f"{error_out.strip()[:60]}...")
                 if error_out.strip():
                     raw_preview = error_out.strip().replace("\r", " ").replace("\n", " ")
-                    self.log(f"[日志] 标题获取原始日志: {raw_preview[:220]}", "INFO")
+                    self._queue_log("queue_log_tag_log", "queue_log_title_fetch_raw", "标题获取原始日志: {output}", "INFO", output=raw_preview[:220])
 
-                task.latest_error_detail = error_out.strip() if error_out.strip() else "标题获取失败"
+                task.latest_error_detail = error_out.strip() if error_out.strip() else self.app.get_text("auth_summary_unknown")
                 task.latest_error_summary = task.latest_error_detail[:300]
-                self._save_failed_history(
-                    task,
-                    failure_stage="title_fetch",
-                    failure_summary=task.latest_error_summary,
-                    return_code=title_result.get("returncode"),
-                )
         except Exception as exc:
             task.final_title = task.get_display_name()
             task.latest_error_detail = str(exc)
             task.latest_error_summary = task.latest_error_detail[:300]
-            self.log(f"[错误] 获取标题异常: {exc},使用默认名称: {task.final_title}", "ERROR")
-            self._save_failed_history(
-                task,
-                failure_stage="title_fetch",
-                failure_summary=task.latest_error_summary,
-                return_code=None,
-            )
+            self._queue_log("queue_log_tag_error", "queue_log_title_fetch_exception", "获取标题异常: {error},使用默认名称: {title}", "ERROR", error=exc, title=task.final_title)
         finally:
             self._safe_after(0, self.update_list)
 
@@ -922,14 +963,14 @@ class YouTubeDownloadManager:
         task.end_time = time.time()
         duration = task.end_time - (task.start_time or task.add_time)
         end_time_str = time.strftime("%H:%M:%S", time.localtime(task.end_time))
-        self.log(f"{completed_message} | 时间: {end_time_str} | 耗时: {duration:.1f}秒", "INFO")
-        self.log(f" 标题: {task.get_display_name()}", "INFO")
+        self.log(self.app.get_text("queue_log_completed_with_timing").format(message=self._runtime_text(completed_message), time=end_time_str, duration=f"{duration:.1f}"), "INFO")
+        self.log(f" {self.app.get_text('queue_log_title', '标题: {title}').format(title=task.get_display_name())}", "INFO")
         self._save_to_history(task)
         self._safe_after(0, self._refresh_history_ui)
         try:
             self.hook_dispatcher.emit(HOOK_EVENT_TASK_COMPLETED, task)
         except Exception as exc:
-            self.log(f"[警告] {hook_warn_message}: {exc}", "WARN")
+            self.log(f"[{self.app.get_text('queue_log_tag_warn', '警告')}] {self._runtime_text(hook_warn_message)}: {exc}", "WARN")
         self.log("-" * 40, "INFO")
 
     def _handle_final_download_failure(self, task, return_code, error_output_buffer):
@@ -937,8 +978,8 @@ class YouTubeDownloadManager:
         task.end_time = time.time()
         duration = task.end_time - (task.start_time or task.add_time)
         end_time_str = time.strftime("%H:%M:%S", time.localtime(task.end_time))
-        self.log(f"[错误] 任务下载失败 | 时间: {end_time_str} | 耗时: {duration:.1f}秒", "ERROR")
-        self.log(f" 标题: {task.get_display_name()}", "INFO")
+        self._queue_log("queue_log_tag_error", "queue_log_task_download_failed", "任务下载失败 | 时间: {time} | 耗时: {duration}秒", "ERROR", time=end_time_str, duration=f"{duration:.1f}")
+        self.log(f" {self.app.get_text('queue_log_title', '标题: {title}').format(title=task.get_display_name())}", "INFO")
 
         failure_summary = ""
         failure_stage = "download"
@@ -949,15 +990,15 @@ class YouTubeDownloadManager:
             diagnostic = self._refine_network_diagnostic(diagnostic)
             if not diagnostic.ok:
                 self._notify_auth_issue(diagnostic, used_cookies=task.needs_cookies)
-                failure_summary = diagnostic.summary or failure_summary
+                failure_summary = self._runtime_text(diagnostic.summary) or failure_summary
                 failure_stage = "auth" if diagnostic.is_auth_related else "network"
             else:
                 failure_stage = self._classify_failure_stage(error_output_buffer)
-        task.latest_error_summary = failure_summary or f"下载失败，退出码 {return_code}"
+        task.latest_error_summary = failure_summary or self.app.get_text("queue_log_task_failed_summary").format(return_code=return_code)
         if not task.latest_error_detail:
             task.latest_error_detail = task.latest_error_summary
         self.record_runtime_issue(
-            f"任务失败: {task.get_display_name()}",
+            self.app.get_text("queue_log_task_failed_issue").format(title=task.get_display_name()),
             task.latest_error_summary,
             level="ERROR",
         )
@@ -970,18 +1011,14 @@ class YouTubeDownloadManager:
         try:
             self.hook_dispatcher.emit(HOOK_EVENT_TASK_FAILED, task)
         except Exception as exc:
-            self.log(f"[警告] 失败 Hook 执行失败: {exc}", "WARN")
+            self._queue_log("queue_log_tag_warn", "queue_log_failed_hook_failed", "失败 Hook 执行失败: {error}", "WARN", error=exc)
         self.log("-" * 40, "INFO")
 
     def _handle_runtime_exception(self, task, exc, is_last_attempt):
         task.latest_error_detail = str(exc)
         task.latest_error_summary = task.latest_error_detail[:300]
-        self.record_runtime_issue(
-            f"任务异常: {task.get_display_name()}",
-            task.latest_error_summary,
-            level="ERROR",
-        )
-        self.log(f"[错误] 任务异常: [{task.id}] - {exc}", "ERROR")
+        self.record_runtime_issue(self.app.get_text("queue_log_runtime_exception_issue").format(title=task.get_display_name()), task.latest_error_summary, level="ERROR")
+        self._queue_log("queue_log_tag_error", "queue_log_runtime_exception", "任务异常: [{task_id}] - {error}", "ERROR", task_id=task.id, error=exc)
         if not is_last_attempt:
             return
         task.status = TASK_STATUS_FAILED
@@ -994,19 +1031,19 @@ class YouTubeDownloadManager:
         try:
             self.hook_dispatcher.emit(HOOK_EVENT_TASK_FAILED, task)
         except Exception as hook_exc:
-            self.log(f"[警告] 运行时失败 Hook 执行失败: {hook_exc}", "WARN")
+            self._queue_log("queue_log_tag_warn", "queue_log_runtime_failed_hook_failed", "运行时失败 Hook 执行失败: {error}", "WARN", error=hook_exc)
 
     def _should_retry_attempt(self, task, attempt, max_retries):
         if task.stop_flag:
             task.status = TASK_STATUS_STOPPED
-            self.log(f"[停止] 任务已停止: [{task.id}]")
+            self._queue_log("queue_log_tag_stop", "queue_log_task_stopped", "任务已停止: [{task_id}]", "INFO", task_id=task.id)
             return False
         if attempt <= 0:
             return True
         retry_summary = getattr(task, "latest_error_summary", "")
         if retry_summary:
-            self.log(f"[警告] 上次失败摘要: {retry_summary}", "WARN")
-            self.log(f"[重试] [{task.id}] 第 {attempt}/{max_retries} 次")
+            self._queue_log("queue_log_tag_warn", "queue_log_previous_failure_summary", "上次失败摘要: {summary}", "WARN", summary=self._runtime_text(retry_summary))
+            self._queue_log("queue_log_tag_retry", "queue_log_retry_attempt", "[{task_id}] 第 {attempt}/{max_retries} 次", "INFO", task_id=task.id, attempt=attempt, max_retries=max_retries)
         time.sleep(5)
         return True
 
@@ -1023,10 +1060,10 @@ class YouTubeDownloadManager:
         last_output = getattr(task, "_last_output_ts", now)
         last_progress = getattr(task, "_last_progress_ts", now)
         if timeout_idle and (now - last_output) > timeout_idle:
-            self.log(f"[超时] 下载无输出超过 {timeout_idle}s: [{task.id}]", "WARN")
+            self._queue_log("queue_log_tag_timeout", "queue_log_no_output_timeout", "下载无输出超过 {seconds}s: [{task_id}]", "WARN", seconds=timeout_idle, task_id=task.id)
             return False
         if timeout_no_progress and (now - last_progress) > timeout_no_progress:
-            self.log(f"[超时] 下载无进度超过 {timeout_no_progress}s: [{task.id}]", "WARN")
+            self._queue_log("queue_log_tag_timeout", "queue_log_no_progress_timeout", "下载无进度超过 {seconds}s: [{task_id}]", "WARN", seconds=timeout_no_progress, task_id=task.id)
             return False
         return True
 
@@ -1065,7 +1102,7 @@ class YouTubeDownloadManager:
 
     def _terminate_process(self, task, reason):
         if task.process and task.process.poll() is None:
-            self.log(f"[终止] {reason}，准备结束进程: [{task.id}]", "WARN")
+            self._queue_log("queue_log_tag_terminate", "queue_log_terminating_process", "{reason}，准备结束进程: [{task_id}]", "WARN", reason=self._runtime_text(reason), task_id=task.id)
             try:
                 task.process.terminate()
                 task.process.wait(timeout=3)
@@ -1094,12 +1131,12 @@ class YouTubeDownloadManager:
 
         ok = self._stream_download_output(task, error_output_buffer, timeout_idle, timeout_no_progress)
         if not ok:
-            self._terminate_process(task, "下载看门狗超时")
-            error_output_buffer.append("下载超时：长时间无输出或无进度")
+            self._terminate_process(task, self.app.get_text("queue_log_watchdog_timeout_reason"))
+            error_output_buffer.append(self.app.get_text("queue_log_watchdog_timeout_error"))
             return 124, error_output_buffer
         if task.stop_flag:
             task.status = TASK_STATUS_STOPPED
-            self.log(f"[停止] 任务已停止: [{task.id}]", "INFO")
+            self._queue_log("queue_log_tag_stop", "queue_log_task_stopped", "任务已停止: [{task_id}]", "INFO", task_id=task.id)
             return None, error_output_buffer
         return_code = task.process.wait()
         return return_code, error_output_buffer
@@ -1117,14 +1154,14 @@ class YouTubeDownloadManager:
         except Exception as exc:
             task.status = TASK_STATUS_FAILED
             task.end_time = time.time()
-            task.latest_error_detail = f"命令构建失败: {exc}"
+            task.latest_error_detail = self.app.get_text("queue_log_command_build_failed_detail").format(error=exc)
             task.latest_error_summary = task.latest_error_detail[:300]
             self.record_runtime_issue(
-                f"任务命令构建失败: {task.get_display_name()}",
+                self.app.get_text("queue_log_command_build_failed_issue").format(title=task.get_display_name()),
                 task.latest_error_summary,
                 level="ERROR",
             )
-            self.log(f"[错误] 命令构建失败: [{task.id}] - {exc}")
+            self._queue_log("queue_log_tag_error", "queue_log_command_build_failed", "命令构建失败: [{task_id}] - {error}", "ERROR", task_id=task.id, error=exc)
             self._save_failed_history(
                 task,
                 failure_stage="command_build",
@@ -1139,7 +1176,7 @@ class YouTubeDownloadManager:
         if section_value:
             fallback_ok, fallback_error = self._run_local_section_fallback(task, output_dir)
             if fallback_ok:
-                self._log_task_success(task, "[完成] 区段回退后任务完成", "区段回退完成 Hook 执行失败")
+                self._log_task_success(task, "queue_log_section_fallback_completed", "queue_log_section_fallback_hook_failed")
                 return True
             if fallback_error:
                 error_output_buffer.append(fallback_error)
@@ -1152,7 +1189,7 @@ class YouTubeDownloadManager:
         
         # 移除重复的 "▶	开始下载" 日志，改为更详细的展示
         if task.needs_cookies:
-            self.log("此任务使用 cookies 下载", "INFO")
+            self.log(self.app.get_text("queue_log_task_uses_cookies"), "INFO")
 
         cmd, output_dir = self._build_download_command(task)
         if not cmd:
@@ -1176,7 +1213,7 @@ class YouTubeDownloadManager:
                 if return_code is None:
                     return
                 if return_code == 0:
-                    self._log_task_success(task, "[完成] 任务下载完成", "完成 Hook 执行失败")
+                    self._log_task_success(task, "queue_log_download_completed", "queue_log_completed_hook_failed")
                     return
 
                 if attempt == max_retries:
@@ -1195,19 +1232,19 @@ class YouTubeDownloadManager:
             db_saved = self.history_repo.save_task(task)
             archive_path = getattr(task, "archive_output_path", "") or getattr(task, "save_path", "")
             if archive_path:
-                self.log(f"归档目录: {archive_path}", "INFO")
+                self.log(self.app.get_text("queue_log_archive_path").format(path=archive_path), "INFO")
             if db_saved:
-                self.log("已保存到历史数据库", "INFO")
+                self.log(self.app.get_text("queue_log_saved_history_db"), "INFO")
             else:
-                self.log("已保存到 JSON 历史备份", "INFO")
+                self.log(self.app.get_text("queue_log_saved_history_json"), "INFO")
         except Exception as exc:
             task.latest_error_summary = str(exc)[:300]
             self.record_runtime_issue(
-                f"历史写入失败: {task.get_display_name()}",
+                self.app.get_text("queue_log_save_history_failed_issue").format(title=task.get_display_name()),
                 task.latest_error_summary,
                 level="WARN",
             )
-            self.log(f"保存历史记录失败: {exc}", "WARN")
+            self.log(self.app.get_text("queue_log_save_history_failed").format(error=exc), "WARN")
 
     def _save_failed_history(self, task, failure_stage="download", failure_summary="", return_code=None):
         """将失败任务写入历史。"""
@@ -1219,17 +1256,17 @@ class YouTubeDownloadManager:
                 return_code=return_code,
             )
             if db_saved:
-                self.log("已保存失败记录到历史数据库", "INFO")
+                self.log(self.app.get_text("queue_log_saved_failed_history_db"), "INFO")
             else:
-                self.log("已保存失败记录到 JSON 历史备份", "INFO")
+                self.log(self.app.get_text("queue_log_saved_failed_history_json"), "INFO")
         except Exception as exc:
             task.latest_error_summary = str(exc)[:300]
             self.record_runtime_issue(
-                f"历史写入失败: {task.get_display_name()}",
+                self.app.get_text("queue_log_save_history_failed_issue").format(title=task.get_display_name()),
                 task.latest_error_summary,
                 level="WARN",
             )
-            self.log(f"保存失败历史记录失败: {exc}", "WARN")
+            self.log(self.app.get_text("queue_log_save_failed_history_failed").format(error=exc), "WARN")
 
     def stop_task(self, task_id):
         """停止指定任务。"""
@@ -1250,12 +1287,18 @@ class YouTubeDownloadManager:
                 try:
                     task.process.wait(timeout=3)
                 except Exception as exc:
-                    self.log(f"[警告] 等待任务进程退出超时: {exc}", "WARN")
+                    self._queue_log(
+                        "queue_log_tag_warn",
+                        "queue_log_wait_process_exit_timeout",
+                        "等待任务进程退出超时: {error}",
+                        "WARN",
+                        error=exc,
+                    )
             except Exception as exc:
-                self.log(f"终止进程时出错: {exc}", "WARN")
+                self.log(self.app.get_text("queue_log_terminate_process_error").format(error=exc), "WARN")
             finally:
                 self._cleanup_task_process(task)
-        self.log(f"正在停止任务: [{task.id}]", "INFO")
+        self._queue_log("queue_log_tag_stop", "queue_log_stopping_task", "正在停止任务: [{task_id}]", "INFO", task_id=task.id)
         return
 
     def stop_all(self):
@@ -1305,12 +1348,18 @@ class YouTubeDownloadManager:
 
         removed_file_count = 0
         for task in tasks:
-            if getattr(task, "status", None) == TASK_STATUS_SUCCESS:
+            if not self._should_cleanup_related_files_on_delete(task):
                 continue
             removed_file_count += len(self._delete_task_related_files(task))
 
         self.update_list()
         return len(tasks), removed_file_count
+
+    def _should_cleanup_related_files_on_delete(self, task):
+        status = getattr(task, "status", None)
+        if status in {TASK_STATUS_SUCCESS, TASK_STATUS_FAILED}:
+            return False
+        return True
 
     def _get_single_selected_task_id(self, task_tree):
         if task_tree is None:
@@ -1384,6 +1433,53 @@ class YouTubeDownloadManager:
             variants.add(fullwidth_variant)
         return {item for item in variants if item}
 
+    def _matches_task_stem(self, stem, stem_candidates):
+        text = (stem or "").strip()
+        if not text:
+            return False
+        if text in stem_candidates:
+            return True
+
+        for candidate in stem_candidates:
+            if not candidate:
+                continue
+            prefix = f"{candidate}."
+            if not text.startswith(prefix):
+                continue
+            suffix = text[len(prefix):]
+            if re.match(r"^f\d+(?:\.[A-Za-z0-9_-]+)?$", suffix, re.IGNORECASE):
+                return True
+            if re.match(r"^f\d+\.[A-Za-z0-9_-]+(?:\.part)?$", suffix, re.IGNORECASE):
+                return True
+            if re.match(r"^fhls[_-][A-Za-z0-9_.-]+$", suffix, re.IGNORECASE):
+                return True
+            if re.match(r"^frag\d+$", suffix, re.IGNORECASE):
+                return True
+            if re.match(r"^part-frag\d+$", suffix, re.IGNORECASE):
+                return True
+        return False
+
+    def _is_task_output_artifact(self, file_name, stem_candidates):
+        lowered = (file_name or "").lower()
+        if lowered.endswith(".ytdl"):
+            stem = file_name[:-5]
+            return self._matches_task_stem(stem, stem_candidates)
+        if lowered.endswith(".info.json"):
+            stem = file_name[:-10]
+            return self._matches_task_stem(stem, stem_candidates)
+
+        stem, ext = os.path.splitext(file_name)
+        if not self._matches_task_stem(stem, stem_candidates):
+            return False
+
+        safe_extensions = {
+            ".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".opus", ".wav", ".flac",
+            ".jpg", ".jpeg", ".png", ".webp", ".info.json", ".description",
+            ".vtt", ".srt", ".ass", ".lrc", ".ttml", ".sbv",
+            ".part", ".temp", ".tmp",
+        }
+        return ext.lower() in safe_extensions
+
     def _delete_task_related_files(self, task):
         output_dir = self._get_task_output_dir(task)
         if not output_dir or not os.path.isdir(output_dir):
@@ -1400,24 +1496,15 @@ class YouTubeDownloadManager:
             full_path = os.path.join(output_dir, name)
             if not os.path.isfile(full_path):
                 continue
-            should_delete = False
 
-            if name.startswith(temp_prefix):
-                should_delete = True
-            else:
-                matched_stem = any(
-                    name == f"{stem}.ytdl" or name.startswith(f"{stem}.")
-                    for stem in stem_candidates
-                )
-                should_delete = matched_stem
-
+            should_delete = name.startswith(temp_prefix) or self._is_task_output_artifact(name, stem_candidates)
             if not should_delete:
                 continue
             try:
                 os.remove(full_path)
                 removed.append(full_path)
             except OSError as exc:
-                self.log(f"[WARN] 删除任务关联文件失败: {full_path} | {exc}", "WARN")
+                self.log(self.app.get_text("queue_log_delete_related_files_failed").format(path=full_path, error=exc), "WARN")
         return removed
 
     def delete_selected(self, task_tree):
@@ -1427,10 +1514,17 @@ class YouTubeDownloadManager:
             return
         removed_tasks, removed_file_count = self._delete_tasks([task_id])
         if removed_tasks and removed_file_count:
-            self.log(f"[清理] 已删除任务关联文件 {removed_file_count} 个: [{task_id}]", "INFO")
+            self._queue_log(
+                "queue_log_tag_cleanup",
+                "queue_log_deleted_related_files",
+                "已删除任务关联文件 {count} 个: [{task_id}]",
+                "INFO",
+                count=removed_file_count,
+                task_id=task_id,
+            )
 
     def delete_all_tasks(self):
-        """删除全部任务；已完成任务保留本地文件，其他任务清理关联缓存/临时文件。"""
+        """删除全部任务；已完成/失败任务保留本地文件，其余任务清理关联缓存/临时文件。"""
         with self._state_lock:
             all_task_ids = [task.id for task in list(self.running_tasks.values()) + list(self.task_queue)]
         if not all_task_ids:
@@ -1446,9 +1540,9 @@ class YouTubeDownloadManager:
 
         removed_tasks, removed_file_count = self._delete_tasks(all_task_ids)
         if removed_tasks:
-            self.log(f"[清理] 已删除全部任务 {removed_tasks} 个", "INFO")
+            self._queue_log("queue_log_tag_cleanup", "queue_log_deleted_all_tasks", "已删除全部任务 {count} 个", "INFO", count=removed_tasks)
         if removed_file_count:
-            self.log(f"[清理] 删除全部任务时已清理任务关联文件 {removed_file_count} 个", "INFO")
+            self._queue_log("queue_log_tag_cleanup", "queue_log_deleted_all_related_files", "删除全部任务时已清理任务关联文件 {count} 个", "INFO", count=removed_file_count)
 
     def _find_task(self, task_id):
         with self._state_lock:

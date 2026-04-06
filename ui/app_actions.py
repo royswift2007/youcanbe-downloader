@@ -139,8 +139,6 @@ def _download_with_progress(url, target_path, progress_cb=None, timeout=20):
         os.remove(tmp_path)
 
     urllib.request.urlretrieve(url, tmp_path, reporthook=report)
-    if os.path.exists(target_path):
-        os.remove(target_path)
     os.replace(tmp_path, target_path)
     return target_path
 
@@ -158,8 +156,6 @@ def _extract_zip_member(zip_path, match_name, target_path):
             raise RuntimeError(f"zip_missing:{match_name}")
         with zf.open(candidate) as src, open(target_path + ".tmp", "wb") as dst:
             shutil.copyfileobj(src, dst)
-        if os.path.exists(target_path):
-            os.remove(target_path)
         os.replace(target_path + ".tmp", target_path)
     return target_path
 
@@ -253,6 +249,15 @@ def _refresh_component_paths(app, base_dir):
             pass
 
 
+def _get_component_target_dir(app, fallback_dir):
+    configured_dir = (getattr(app, "components_dir", "") or "").strip()
+    if configured_dir:
+        return os.path.abspath(configured_dir)
+    if fallback_dir:
+        return os.path.abspath(fallback_dir)
+    return os.getcwd()
+
+
 def update_components(app, base_dir, components=None):
     """更新或下载 yt-dlp/ffmpeg/deno 单文件到程序根目录。"""
     if getattr(app, 'yt_dlp_update_in_progress', False):
@@ -260,6 +265,8 @@ def update_components(app, base_dir, components=None):
         return
 
     selected = components or ["yt-dlp", "ffmpeg", "deno"]
+    target_dir = _get_component_target_dir(app, base_dir)
+    os.makedirs(target_dir, exist_ok=True)
     app.main_status_var.set(app.get_text("components_update_start"))
     app.yt_dlp_update_in_progress = True
 
@@ -278,9 +285,9 @@ def update_components(app, base_dir, components=None):
     def run_update():
         try:
             for comp in selected:
-                _ensure_component(app, base_dir, comp, progress_ui)
+                _ensure_component(app, target_dir, comp, progress_ui)
 
-            _refresh_component_paths(app, base_dir)
+            _refresh_component_paths(app, target_dir)
 
             app.root.after(0, lambda: [
                 app.SilentMessagebox.showinfo(
@@ -314,7 +321,10 @@ def update_components(app, base_dir, components=None):
 
 def update_yt_dlp(app, yt_dlp_path):
     """兼容旧入口：仅更新 yt-dlp。"""
-    base_dir = os.path.dirname(os.path.abspath(yt_dlp_path)) if yt_dlp_path else os.getcwd()
+    base_dir = _get_component_target_dir(
+        app,
+        os.path.dirname(os.path.abspath(yt_dlp_path)) if yt_dlp_path else os.getcwd(),
+    )
     return update_components(app, base_dir, components=["yt-dlp"])
 
 
@@ -385,8 +395,10 @@ def notify_cookies_error(app, diagnostic=None):
         return
 
     app.cookies_error_notified = True
-    summary = getattr(diagnostic, 'summary', None) or app.get_text("app_cookies_diag_summary")
-    action_hint = getattr(diagnostic, 'action_hint', None) or app.get_text("app_cookies_diag_hint_default")
+    raw_summary = getattr(diagnostic, 'summary', None) or app.get_text("app_cookies_diag_summary")
+    raw_action_hint = getattr(diagnostic, 'action_hint', None) or app.get_text("app_cookies_diag_hint_default")
+    summary = app.get_text(raw_summary, raw_summary)
+    action_hint = app.get_text(raw_action_hint, raw_action_hint)
 
     app.root.after(500, lambda: app.SilentMessagebox.showwarning(
         app.get_text("app_cookies_diag_warn_title"),

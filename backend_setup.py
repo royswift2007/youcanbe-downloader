@@ -52,7 +52,7 @@ FILE_REPLACE_RETRY_DELAY_SECONDS = 0.05
 FILE_REPLACE_MAX_ATTEMPTS = 20
 COMPONENT_METADATA_FILENAME = ".ycb_component_versions.json"
 HTTP_HEADERS = {
-    "User-Agent": "YCB-Installer/0.1.0",
+    "User-Agent": "YCB-Installer/0.1.1",
     "Accept": "*/*",
 }
 
@@ -465,11 +465,9 @@ def find_existing_component_paths(name: str, target_dir: str) -> list[str]:
         seen.add(key)
         candidates.append(absolute_candidate)
 
+    # Only reuse components that already exist in the target app directory.
+    # System-wide PATH matches must not suppress installer downloads.
     add_candidate(os.path.join(os.path.abspath(target_dir), source["filename"]))
-    add_candidate(shutil.which(source["filename"]))
-    add_candidate(shutil.which(name))
-    if os.name == "nt" and not name.lower().endswith(".exe"):
-        add_candidate(shutil.which(name + ".exe"))
     return candidates
 
 

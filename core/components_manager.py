@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import shutil
 import subprocess
 import time
 
@@ -122,9 +121,14 @@ class ComponentsManager:
         return ComponentStatus("ffmpeg", path=path, version=version, ok=ok, message=message)
 
     def check_deno(self):
-        path = self.deno_path or shutil.which("deno") or shutil.which("deno.exe") or "deno"
-        version_text, ok, message = self._run_version([path, "--version"], timeout=6)
-        version = version_text.splitlines()[0] if version_text else ""
+        path = self.deno_path
+        version_text = ""
+        version = ""
+        ok = False
+        message = ""
+        if path:
+            version_text, ok, message = self._run_version([path, "--version"], timeout=6)
+            version = version_text.splitlines()[0] if version_text else ""
         if ok and version_text:
             first_line = version_text.splitlines()[0]
             parsed = first_line.replace("deno ", "").strip()
@@ -140,9 +144,24 @@ class ComponentsManager:
                     "components_version_too_old",
                     "{name} version too old (min: {min})",
                 ).format(name="deno", min=MIN_DENO_VERSION)
-        if not ok and message == "not_found":
-            message = self._t("components_binary_missing", "{name} executable not found").format(name="deno")
+        if not ok:
+            if not path:
+                message = self._t("components_binary_missing", "{name} executable not found").format(name="deno")
+            elif message == "not_found":
+                message = self._t("components_binary_missing", "{name} executable not found").format(name="deno")
         return ComponentStatus("deno", path=path, version=version, ok=ok, message=message)
+
+    def _sanitize_diagnostic_path(self, path_value):
+        text = (path_value or "").strip()
+        if not text:
+            return ""
+        normalized = text.replace("\\", "/")
+        parts = [part for part in normalized.split("/") if part]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return f".../{parts[-2]}/{parts[-1]}"
 
     def export_diagnostics(self, output_path, statuses):
         payload = {
@@ -150,7 +169,7 @@ class ComponentsManager:
             "components": [
                 {
                     "name": item.name,
-                    "path": item.path,
+                    "path": self._sanitize_diagnostic_path(item.path),
                     "version": item.version,
                     "ok": item.ok,
                     "message": item.message,

@@ -91,7 +91,7 @@ def detect_auth_diagnostic(error_output):
             ["confirm your age", "content is age-restricted", "age-restricted"],
             "ERROR",
             "auth_summary_age_restricted",
-            "建议优先启用 Browser Cookies（Chrome/Edge/Firefox），或重新导出已登录账号的 cookies 文件后重试。",
+            "auth_action_age_restricted",
             True,
         ),
         (
@@ -99,7 +99,7 @@ def detect_auth_diagnostic(error_output):
             ["video is private", "private video"],
             "ERROR",
             "auth_summary_private_video",
-            "请确认当前账号具备访问权限，并使用 Browser Cookies 或更新 cookies 文件。",
+            "auth_action_private_video",
             True,
         ),
         (
@@ -107,7 +107,7 @@ def detect_auth_diagnostic(error_output):
             ["members-only", "join this channel"],
             "ERROR",
             "auth_summary_members_only",
-            "请确认当前账号具备会员权限，并使用 Browser Cookies 或更新 cookies 文件。",
+            "auth_action_members_only",
             True,
         ),
         (
@@ -115,7 +115,7 @@ def detect_auth_diagnostic(error_output):
             ["requires payment", "video requires purchase"],
             "ERROR",
             "auth_summary_payment_required",
-            "请确认当前账号已购买对应内容，并使用已登录账号的 cookies。",
+            "auth_action_payment_required",
             True,
         ),
         (
@@ -131,7 +131,7 @@ def detect_auth_diagnostic(error_output):
             ],
             "ERROR",
             "auth_summary_login_required",
-            "建议启用 Browser Cookies；如继续使用文件模式，请重新导出 `www.youtube.com_cookies.txt`。",
+            "auth_action_login_required",
             True,
         ),
         (
@@ -148,7 +148,7 @@ def detect_auth_diagnostic(error_output):
             ],
             "ERROR",
             "auth_summary_forbidden",
-            "建议检查 cookies 与代理设置；可尝试启用 Browser Cookies 或 PO Token；若内容本身不可用则无法通过重试解决。",
+            "auth_action_forbidden",
             True,
         ),
         (
@@ -164,7 +164,7 @@ def detect_auth_diagnostic(error_output):
             ],
             "WARNING",
             "auth_summary_js_challenge",
-            "这通常不是 cookies 本身失效，可优先检查 `yt-dlp.exe` 版本与当前网络环境。",
+            "auth_action_js_challenge",
             False,
         ),
         (
@@ -172,7 +172,7 @@ def detect_auth_diagnostic(error_output):
             ["not a bot", "unusual traffic", "to continue, please type the characters"],
             "WARNING",
             "auth_summary_bot_check",
-            "建议稍后重试，必要时更换网络环境，并使用有效 cookies。",
+            "auth_action_bot_check",
             True,
         ),
         (
@@ -196,7 +196,7 @@ def detect_auth_diagnostic(error_output):
             ],
             "WARNING",
             "auth_summary_network",
-            "请先检查网络连通性、代理配置与 TLS/SSL 环境，再判断是否需要重新导出 cookies。",
+            "auth_action_network",
             False,
         ),
     ]

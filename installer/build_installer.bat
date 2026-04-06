@@ -6,7 +6,7 @@ cd /d "%ROOT%"
 
 echo [1/4] Cleaning previous setup output...
 if not exist "dist-setup" mkdir "dist-setup"
-del /q "dist-setup\YCB-Setup-v0.1.0.exe" 2>nul
+del /q "dist-setup\YCB-Setup.exe" 2>nul
 
 echo [2/4] Building main application with [`YCB.spec`](YCB.spec)...
 py -m PyInstaller --noconfirm "YCB.spec"
@@ -29,7 +29,8 @@ if errorlevel 1 goto :fail_setup
 
 echo.
 echo Build completed successfully.
-echo Output: "dist-setup\YCB-Setup-v0.1.0.exe"
+echo Main app directory: "dist\YCB\YCB.exe"
+echo Output: "dist-setup\YCB-Setup.exe"
 goto :eof
 
 :fail_main

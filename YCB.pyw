@@ -96,6 +96,15 @@ def _get_app_data_dir():
 APP_DATA_DIR = _get_app_data_dir()
 
 
+def _get_component_storage_dir():
+    if getattr(sys, 'frozen', False) and APP_DATA_DIR:
+        return APP_DATA_DIR
+    return base_path
+
+
+COMPONENTS_DIR = _get_component_storage_dir()
+
+
 def get_resource_path(relative_path):
     """获取资源文件的绝对路径，优先返回实际存在的资源路径。"""
     candidate_roots = []
@@ -116,6 +125,14 @@ def get_resource_path(relative_path):
             return candidate
     return os.path.join(fallback_root, relative_path)
 
+
+def _safe_int_config(raw_value, default_value, min_value=0):
+    try:
+        value = int((raw_value or str(default_value)).strip() or default_value)
+    except (TypeError, ValueError, AttributeError):
+        value = default_value
+    return max(min_value, value)
+
 def _is_executable_file(path):
     if not path or not os.path.isfile(path):
         return False
@@ -132,22 +149,24 @@ def _debug_exception(context, exc):
         pass
 
 
-def _resolve_component_binary(base_dir, name):
+def _resolve_component_binary(name):
     candidates = [f"{name}.exe", name] if os.name == "nt" else [name, f"{name}.exe"]
-    for candidate in candidates:
-        full_path = os.path.join(base_dir, candidate)
-        if _is_executable_file(full_path):
-            return full_path
-    for candidate in candidates:
-        found = shutil.which(candidate)
-        if found and _is_executable_file(found):
-            return found
+    candidate_roots = []
+    if COMPONENTS_DIR:
+        candidate_roots.append(COMPONENTS_DIR)
+    if base_path and base_path not in candidate_roots:
+        candidate_roots.append(base_path)
+    for root_dir in candidate_roots:
+        for candidate in candidates:
+            full_path = os.path.join(root_dir, candidate)
+            if _is_executable_file(full_path):
+                return full_path
     return None
 
 
-yt_dlp_path = _resolve_component_binary(base_path, "yt-dlp")
-ffmpeg_path = _resolve_component_binary(base_path, "ffmpeg")
-deno_path = _resolve_component_binary(base_path, "deno")
+yt_dlp_path = _resolve_component_binary("yt-dlp")
+ffmpeg_path = _resolve_component_binary("ffmpeg")
+deno_path = _resolve_component_binary("deno")
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "window_pos.json")  # 窗口位置配置文件
 INSTALLER_PREFS_FILE = os.path.join(base_path, "install_prefs.json")
 INSTALLER_PREFS_SENTINEL = os.path.join(APP_DATA_DIR, ".installer_lang_consumed")
@@ -272,13 +291,33 @@ def load_window_pos(root_window, position_repo):
     try:
         screen_width = root_window.winfo_screenwidth()
         screen_height = root_window.winfo_screenheight()
-        if not is_geometry_visible(pos, screen_width, screen_height):
-            width = int(pos.get('width', 1400) or 1400)
+        display_bounds = []
+        try:
+            virtual_left = int(root_window.winfo_vrootx())
+            virtual_top = int(root_window.winfo_vrooty())
+            virtual_width = int(root_window.winfo_vrootwidth())
+            virtual_height = int(root_window.winfo_vrootheight())
+            if virtual_width > 0 and virtual_height > 0:
+                display_bounds.append((
+                    virtual_left,
+                    virtual_top,
+                    virtual_left + virtual_width,
+                    virtual_top + virtual_height,
+                ))
+        except Exception:
+            pass
+        if not display_bounds and screen_width > 0 and screen_height > 0:
+            display_bounds.append((0, 0, int(screen_width), int(screen_height)))
+
+        if not is_geometry_visible(pos, screen_width, screen_height, display_bounds=display_bounds):
+            width = int(pos.get('width', 1650) or 1650)
             height = int(pos.get('height', 1000) or 1000)
             width = max(900, min(width, screen_width))
             height = max(600, min(height, screen_height))
-            x = max(0, (screen_width - width) // 2)
-            y = max(0, (screen_height - height) // 2)
+            bounds = display_bounds[0] if display_bounds else (0, 0, int(screen_width), int(screen_height))
+            left, top, right, bottom = bounds
+            x = max(left, left + (max(0, right - left) - width) // 2)
+            y = max(top, top + (max(0, bottom - top) - height) // 2)
             root_window.geometry(f"{width}x{height}+{x}+{y}")
             return
 
@@ -396,6 +435,7 @@ class DownloadApplication:
     def _init_core_state(self):
         self.HISTORY_FILES = HISTORY_FILES
         self.base_path = base_path
+        self.components_dir = COMPONENTS_DIR
         self.components_manager = ComponentsManager(yt_dlp_path, ffmpeg_path, deno_path=deno_path, text_getter=self.get_text)
         self.current_history_data = []
 
@@ -484,9 +524,9 @@ class DownloadApplication:
         try:
             restored = self.ytdlp_manager.load_pending_tasks()
             if restored:
-                self.ytdlp_manager.log(f"已恢复未完成任务: {restored} 个", "INFO")
+                self.ytdlp_manager.log(self.get_text("runtime_pending_tasks_restored").format(count=restored), "INFO")
         except Exception as exc:
-            self.ytdlp_manager.log(f"恢复未完成任务失败: {exc}", "WARN")
+            self.ytdlp_manager.log(self.get_text("runtime_pending_tasks_restore_failed").format(error=exc), "WARN")
         self._check_dependencies_and_log()
         debug_startup("dependency checks started")
         self.default_cookies_mode = self.cookies_mode_var.get().strip() if getattr(self, "cookies_mode_var", None) else "file"
@@ -528,6 +568,7 @@ class DownloadApplication:
             text = ""
             if diagnostic and not diagnostic.ok:
                 summary = (getattr(diagnostic, "summary", "") or "").strip()
+                summary = self.get_text(summary, summary)
                 if summary == "未检测到本地 Cookies 文件 (选填)":
                     summary = self.get_text("app_cookies_missing_optional")
                 text = self.get_text("topbar_auth_error").format(summary=summary)
@@ -537,6 +578,7 @@ class DownloadApplication:
                 text = self.get_text("topbar_auth_file_configured")
             elif status and getattr(status, "last_message", "") and status.last_message != self.get_text("auth_last_check_none"):
                 message = (status.last_message or "").strip()
+                message = self.get_text(message, message)
                 if message == "未检测到本地 Cookies 文件 (选填)":
                     message = self.get_text("app_cookies_missing_optional")
                 text = self.get_text("topbar_auth_last_message").format(message=message)
@@ -676,6 +718,8 @@ class DownloadApplication:
             frame.cookies_mode_var.set(self.default_cookies_mode)
         if frame and getattr(frame, "cookies_browser_var", None):
             frame.cookies_browser_var.set(self.default_browser_cookies)
+        if frame and getattr(frame, "use_po_token_var", None):
+            frame.use_po_token_var.set(self.default_use_po_token)
 
         if frame and getattr(frame, "cookies_mode_var", None) and not getattr(frame, "_cookies_sync_bound", False):
             def sync_from_frame(*_args):
@@ -685,6 +729,8 @@ class DownloadApplication:
             add_trace_helper(frame.cookies_mode_var, 'write', lambda *_args: sync_from_frame())
             if getattr(frame, "cookies_browser_var", None):
                 add_trace_helper(frame.cookies_browser_var, 'write', lambda *_args: sync_from_frame())
+            if getattr(frame, "use_po_token_var", None):
+                add_trace_helper(frame.use_po_token_var, 'write', lambda *_args: sync_from_frame())
             frame._cookies_sync_bound = True
 
     def get_ui_state_value(self, *keys, default=None):
@@ -778,18 +824,39 @@ class DownloadApplication:
 
             self.default_cookies_mode = mode or "file"
             self.default_browser_cookies = browser
+            self.default_use_po_token = bool(self.use_po_token_var.get())
             self.set_ui_state_value("cookies", "mode", value=self.default_cookies_mode)
             self.set_ui_state_value("cookies", "browser", value=self.default_browser_cookies)
             self.set_ui_state_value("cookies", "file_path", value=self.COOKIES_FILE_PATH)
+            self.set_ui_state_value("pot", "enabled", value=self.default_use_po_token)
             self.set_ui_state_value("clipboard", "watch", value=bool(self.clipboard_watch_var.get()))
             self.set_ui_state_value("clipboard", "auto_parse", value=bool(self.clipboard_auto_parse_var.get()))
-            self.set_ui_state_value("downloads", "retry", value=max(0, int((self.download_retry_var.get() or "3").strip() or 3)))
-            self.set_ui_state_value("downloads", "concurrent", value=max(1, int((self.download_concurrent_var.get() or "1").strip() or 1)))
-            self.set_ui_state_value("downloads", "speed_limit", value=max(0, int((self.download_speed_limit_var.get() or "0").strip() or 0)))
+            retry_value = _safe_int_config(
+                self.download_retry_var.get() if getattr(self, "download_retry_var", None) else None,
+                default_value=3,
+                min_value=0,
+            )
+            concurrent_value = _safe_int_config(
+                self.download_concurrent_var.get() if getattr(self, "download_concurrent_var", None) else None,
+                default_value=1,
+                min_value=1,
+            )
+            speed_limit_value = _safe_int_config(
+                self.download_speed_limit_var.get() if getattr(self, "download_speed_limit_var", None) else None,
+                default_value=0,
+                min_value=0,
+            )
+            self.set_ui_state_value("downloads", "retry", value=retry_value)
+            self.set_ui_state_value("downloads", "concurrent", value=concurrent_value)
+            self.set_ui_state_value("downloads", "speed_limit", value=speed_limit_value)
             self.save_ui_state()
             if getattr(self, "metadata_service", None):
                 try:
-                    self.metadata_service.update_cookies_settings(self.default_cookies_mode, self.default_browser_cookies)
+                    self.metadata_service.update_cookies_settings(
+                        self.default_cookies_mode,
+                        self.default_browser_cookies,
+                        use_po_token=self.default_use_po_token,
+                    )
                 except Exception as exc:
                     _debug_exception("sync_settings update metadata cookies failed", exc)
             for target in getattr(self, "input_frames", []) or []:
@@ -840,12 +907,8 @@ class DownloadApplication:
                     break
             except Exception:
                 continue
-        if active_frame and getattr(active_frame, "cookies_mode_var", None):
-            self.default_cookies_mode = active_frame.cookies_mode_var.get().strip() or "file"
-        if active_frame and getattr(active_frame, "cookies_browser_var", None):
-            self.default_browser_cookies = active_frame.cookies_browser_var.get().strip()
-        if active_frame and getattr(active_frame, "use_po_token_var", None):
-            self.default_use_po_token = bool(active_frame.use_po_token_var.get())
+        if active_frame:
+            self._sync_settings_state(source="frame", frame=active_frame)
 
     def _start_log_processors(self):
         """启动所有管理器的日志队列处理器"""
@@ -1011,17 +1074,6 @@ class DownloadApplication:
             # 只有真正的“等待中”才计入退出提示的等待数
             waiting_count = sum(1 for t in self.ytdlp_manager.task_queue if getattr(t, "status", None) == TASK_STATUS_WAITING)
 
-        # 关闭前将运行中和非终止任务统一标记为 WAITING，确保下一次启动能恢复
-        try:
-            with self.ytdlp_manager._state_lock:
-                for task in self.ytdlp_manager.running_tasks.values():
-                    if getattr(task, "status", None) not in {TASK_STATUS_SUCCESS, TASK_STATUS_FAILED}:
-                        task.status = TASK_STATUS_WAITING
-                for task in self.ytdlp_manager.task_queue:
-                    if getattr(task, "status", None) not in {TASK_STATUS_SUCCESS, TASK_STATUS_FAILED}:
-                        task.status = TASK_STATUS_WAITING
-        except Exception:
-            pass
         busy_states = []
         if running_count > 0:
             busy_states.append(self.get_text("close_busy_running").format(count=running_count))

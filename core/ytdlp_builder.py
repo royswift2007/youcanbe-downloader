@@ -123,20 +123,22 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
         if resolved_embed_subs is False:
             resolved_embed_subs = True
 
-    if resolved_subtitle_mode in {"manual", "both"}:
+    subtitle_requested = resolved_subtitle_mode != "none"
+    should_write_subs = subtitle_requested and (resolved_write_subs or resolved_embed_subs)
+
+    if should_write_subs and resolved_subtitle_mode in {"manual", "both"}:
         cmd.append("--write-subs")
-    if resolved_subtitle_mode in {"auto", "both"}:
+    if should_write_subs and resolved_subtitle_mode in {"auto", "both"}:
         cmd.append("--write-auto-subs")
 
-    if resolved_subtitle_mode != "none" and resolved_sub_langs:
+    if should_write_subs and resolved_sub_langs:
         cmd.extend(["--sub-langs", resolved_sub_langs])
 
-    if resolved_subtitle_mode != "none" and subtitle_format:
+    if should_write_subs and subtitle_format:
         cmd.extend(["--sub-format", subtitle_format])
 
-    if resolved_subtitle_mode != "none":
-        if resolved_embed_subs:
-            cmd.append("--embed-subs")
+    if subtitle_requested and resolved_embed_subs:
+        cmd.append("--embed-subs")
 
     if download_sections:
         cmd.extend(["--download-sections", download_sections])

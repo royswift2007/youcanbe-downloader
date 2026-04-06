@@ -9,9 +9,6 @@
 - **适用平台**：Windows（当前仓库提供 `.exe` 组件）
 
 > English version: [`README.md`](README.md)
->
-> 深度使用说明与功能手册：[`usage_intro.md`](usage_intro.md)
-
 
 > [!IMPORTANT]
 > 首次运行前/首次运行时，请先进入 **设置 → 组件中心**，点击“**组件更新（yt-dlp/ffmpeg/deno）**”。
@@ -187,7 +184,7 @@ python YCB.pyw
 
 - **Cookies 文件**：默认 `www.youtube.com_cookies.txt`（Netscape 格式）
 - **Browser Cookies**：Chrome / Edge / Firefox
-- **PO Token**：需要 Node.js（建议 ≥16）
+- **PO Token**：需要 Node.js（建议 ≥18）
 
 ---
 

@@ -252,7 +252,8 @@ class BatchSourceInputFrame(ttk.LabelFrame):
         self.sponsorblock_categories_var = tk.StringVar(value="sponsor")
         ttk.Checkbutton(postprocess_row, text=self.app.get_text("batch_post_sponsorblock"), variable=self.sponsorblock_enabled_var, command=self._update_batch_summary).pack(side='left', padx=(8, 0))
         ttk.Entry(postprocess_row, textvariable=self.sponsorblock_categories_var, width=16).pack(side='left', padx=(6, 0))
-        self.use_po_token_var = tk.BooleanVar(value=False)
+        initial_use_po_token = bool(self.app.use_po_token_var.get()) if getattr(self.app, "use_po_token_var", None) else bool(getattr(self.app, "default_use_po_token", False))
+        self.use_po_token_var = tk.BooleanVar(value=initial_use_po_token)
         ttk.Checkbutton(postprocess_row, text=self.app.get_text("batch_post_use_po_token"), variable=self.use_po_token_var, command=self._update_batch_summary).pack(side='left', padx=(8, 0))
 
         self.retry_var = self.app.download_retry_var

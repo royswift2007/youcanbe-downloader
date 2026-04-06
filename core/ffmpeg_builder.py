@@ -132,6 +132,11 @@ def _build_encoding_args(profile):
     return args
 
 
+
+def _needs_reencode(profile):
+    return bool(_build_encoding_args(profile))
+
+
 def _build_extra_args(extra_args):
     tokens, error_message = parse_and_validate_ffmpeg_extra_args(extra_args)
     if error_message:
@@ -187,10 +192,11 @@ def build_ffmpeg_command(ffmpeg_path, job):
             "-y",
             "-i",
             input_path,
-            "-c",
-            "copy",
         ]
-        cmd.extend(_build_encoding_args(profile))
+        if _needs_reencode(profile):
+            cmd.extend(_build_encoding_args(profile))
+        else:
+            cmd.extend(["-c", "copy"])
         cmd.extend(_build_extra_args(getattr(profile, "extra_args", "")))
         cmd.append(output_path)
         return cmd
@@ -226,8 +232,10 @@ def build_ffmpeg_command(ffmpeg_path, job):
         cmd.extend(["-i", input_path])
         if end_time:
             cmd.extend(["-to", end_time])
-        cmd.extend(["-c", "copy"])
-        cmd.extend(_build_encoding_args(profile))
+        if _needs_reencode(profile):
+            cmd.extend(_build_encoding_args(profile))
+        else:
+            cmd.extend(["-c", "copy"])
         cmd.extend(_build_extra_args(getattr(profile, "extra_args", "")))
         cmd.append(output_path)
         return cmd
@@ -245,10 +253,11 @@ def build_ffmpeg_command(ffmpeg_path, job):
             "0",
             "-i",
             list_path,
-            "-c",
-            "copy",
         ]
-        cmd.extend(_build_encoding_args(profile))
+        if _needs_reencode(profile):
+            cmd.extend(_build_encoding_args(profile))
+        else:
+            cmd.extend(["-c", "copy"])
         cmd.extend(_build_extra_args(getattr(profile, "extra_args", "")))
         cmd.append(output_path)
         return cmd
