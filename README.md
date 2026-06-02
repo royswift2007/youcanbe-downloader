@@ -15,6 +15,22 @@ A desktop YouTube downloader and local media toolkit built on `yt-dlp` + `ffmpeg
 > [!IMPORTANT]
 > On first launch, go to **Settings → Components** and click **Component Update (yt-dlp/ffmpeg/deno)** first.
 > The app depends on these components for downloading and media processing. If they are not present yet, update them before use.
+>
+---
+
+![single_video](images/single_video.jpg)
+
+---
+
+![playlist](images/playlist.jpg)
+
+---
+
+![queue](images/queue.jpg)
+
+---
+
+![settings](images/settings.jpg)
 
 ---
 
@@ -208,18 +224,4 @@ This project uses **GPLv3 + Commons Clause** (non-commercial). See [`LICENSE`](L
 - For the full parameter list and detailed guidance, see [`usage_intro_en.md`](usage_intro_en.md) (this README is a compact version).
 - If you distribute binaries, ship the source and license file together.
 
----
 
-![single_video](images/single_video.jpg)
-
----
-
-![playlist](images/playlist.jpg)
-
----
-
-![queue](images/queue.jpg)
-
----
-
-![settings](images/settings.jpg)
