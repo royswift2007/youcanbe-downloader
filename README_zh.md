@@ -16,6 +16,22 @@
 > 首次运行前/首次运行时，请先进入 **设置 → 组件中心**，点击“**组件更新（yt-dlp/ffmpeg/deno）**”。
 > 程序依赖这些组件完成下载与处理；如果本地还没有组件，请先更新再使用。
 
+
+---
+
+![单视频下载](images/single_video.jpg)
+
+---
+
+![播放列表/频道下载](images/playlist.jpg)
+
+---
+
+![下载队列管理](images/queue.jpg)
+
+---
+
+![设置](images/settings.jpg)
 ---
 
 ## ✨ 功能总览
@@ -211,18 +227,3 @@ python YCB.pyw
 - 如需完整参数说明与逐项细节，可参考 [`usage_intro.md`](usage_intro.md)（本 README 为精简版）。
 - 如需分发二进制版本，请确保同时提供源码与许可证文件。
 
----
-
-![单视频下载](images/single_video.jpg)
-
----
-
-![播放列表/频道下载](images/playlist.jpg)
-
----
-
-![下载队列管理](images/queue.jpg)
-
----
-
-![设置](images/settings.jpg)
