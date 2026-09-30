@@ -250,18 +250,24 @@ class MediaJobManager:
         self._safe_after(0, self.update_list)
         self._safe_after(100, self.start_next_job)
 
-    def _cleanup_job_process(self, job, kill_timeout=3):
+    def _cleanup_job_process(self, job, kill_timeout=3, force=False):
         proc = getattr(job, "process", None)
         if proc is None:
+            return
+        if getattr(job, "_process_cleaned", False):
+            job.process = None
             return
         try:
             if proc.poll() is None:
                 try:
-                    proc.terminate()
+                    if force:
+                        proc.kill()
+                    else:
+                        proc.terminate()
                     proc.wait(timeout=kill_timeout)
                 except Exception:
-                    proc.kill()
                     try:
+                        proc.kill()
                         proc.wait(timeout=kill_timeout)
                     except Exception as exc:
                         self._queue_log("queue_log_tag_warn", "media_log_wait_process_exit_timeout", "等待媒体进程终止超时: {error}", "WARN", error=exc)
@@ -273,6 +279,7 @@ class MediaJobManager:
                     proc.stdout.close()
             except Exception as exc:
                 self._queue_log("queue_log_tag_warn", "media_log_stdout_close_failed", "关闭媒体进程输出流失败: {error}", "WARN", error=exc)
+            job._process_cleaned = True
             job.process = None
 
     def _run_ffmpeg_job(self, job):
@@ -292,6 +299,7 @@ class MediaJobManager:
             os.makedirs(output_dir, exist_ok=True)
 
         try:
+            job._process_cleaned = False
             job.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -303,17 +311,27 @@ class MediaJobManager:
                 startupinfo=self.startupinfo,
             )
             error_lines = []
-            for line in job.process.stdout:
-                if job.stop_flag:
-                    job.process.kill()
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                if "error" in line.lower() or "invalid" in line.lower():
-                    error_lines.append(line)
-                if len(error_lines) > 6:
-                    error_lines = error_lines[-6:]
+            proc = job.process
+            try:
+                for line in proc.stdout:
+                    if job.stop_flag:
+                        try:
+                            current_proc = job.process
+                            if current_proc is not None:
+                                current_proc.kill()
+                        except (OSError, ValueError):
+                            pass
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "error" in line.lower() or "invalid" in line.lower():
+                        error_lines.append(line)
+                    if len(error_lines) > 6:
+                        error_lines = error_lines[-6:]
+            except (OSError, ValueError):
+                if not job.stop_flag:
+                    raise
             if job.stop_flag:
                 job.status = MEDIA_JOB_STATUS_STOPPED
                 self._queue_log("queue_log_tag_stop", "media_log_job_stopped", "媒体任务已停止: [{job_id}]", "INFO", job_id=job.id)
@@ -346,9 +364,11 @@ class MediaJobManager:
         if not job:
             return
         job.stop_flag = True
-        if job.process:
+        self._queue_log("queue_log_tag_stop", "media_log_stopping_job", "正在停止媒体任务: [{job_id}]", "INFO", job_id=job.id)
+        proc = getattr(job, "process", None)
+        if proc is not None:
             try:
-                pid = job.process.pid
+                pid = proc.pid
                 subprocess.run(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
                     capture_output=True,
@@ -357,10 +377,14 @@ class MediaJobManager:
                 )
             except Exception as exc:
                 self.log(self.app.get_text("media_log_terminate_process_error").format(error=exc), "WARN")
-            finally:
-                self._cleanup_job_process(job)
-        self._queue_log("queue_log_tag_stop", "media_log_stopping_job", "正在停止媒体任务: [{job_id}]", "INFO", job_id=job.id)
         return
+
+    def stop_all(self):
+        """停止所有运行中的媒体任务。"""
+        with self._state_lock:
+            job_ids = list(self.running_jobs.keys())
+        for job_id in job_ids:
+            self.stop_job(job_id)
 
     def stop_selected(self, job_tree):
         selection = job_tree.selection() if job_tree is not None else ()

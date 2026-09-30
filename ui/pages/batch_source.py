@@ -14,6 +14,7 @@ from core.manual_format_policy import (
 )
 from core.youtube_models import BATCH_SOURCE_CHANNEL, BATCH_SOURCE_PLAYLIST, BATCH_SOURCE_UPLOADS
 from ui.input_validators import AUDIO_OUTPUT_FORMATS, VIDEO_OUTPUT_FORMATS, build_profile_from_input, validate_advanced_args, validate_custom_filename, validate_download_sections, validate_output_format_compatibility, validate_proxy_url
+from ui.video_actions import format_count_separated
 
 
 class BatchSourceInputFrame(ttk.LabelFrame):
@@ -404,7 +405,7 @@ class BatchSourceInputFrame(ttk.LabelFrame):
 
     def _format_views(self, count):
         value = int(count or 0)
-        return f"{value:,}" if value else self.app.get_text("batch_views_unknown")
+        return format_count_separated(value) if value else self.app.get_text("batch_views_unknown")
 
     def _source_type_label(self, source_type):
         if source_type == BATCH_SOURCE_PLAYLIST:
@@ -1193,10 +1194,6 @@ class BatchSourceInputFrame(ttk.LabelFrame):
                     profile.custom_filename = None
                 if manual_expr:
                     self._apply_manual_policy_to_profile(profile, manual_expr)
-
-                if self.download_sections_var.get().strip() and not validate_download_sections(self, self.download_sections_var.get().strip()):
-                    self.manager.log(self.app.get_text("batch_sections_invalid"), "WARNING")
-                    return
 
                 task = self._create_task(entry.url, profile)
                 task.final_title = entry.get_display_title()

@@ -87,6 +87,7 @@ class AuthStatusWindow:
             pot_status = self.app.get_text("pot_status_disabled").replace("{icon}", "").strip()
         ttk.Label(frame, text=self.app.get_text("auth_pot_title"), font=(self.app.FONT_FAMILY, self.app.FONT_SIZE_TITLE, 'bold')).pack(anchor='w', pady=(6, 0))
         ttk.Label(frame, text=self.app.get_text("auth_pot_status").format(status=pot_status, message=pot_message)).pack(anchor='w', pady=(4, 0))
+        ttk.Label(frame, text=self.app.get_text("auth_pot_pipeline").format(pipeline=pot_detail.get('pipeline') or '-')).pack(anchor='w', pady=(0, 4))
         last_updated = pot_detail.get('last_updated_at')
         last_updated_text = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_updated)) if last_updated else '-'
         ttk.Label(frame, text=self.app.get_text("auth_pot_last_update").format(time=last_updated_text)).pack(anchor='w', pady=(0, 4))
@@ -143,12 +144,10 @@ class RuntimeStatusWindow:
         ttk.Label(frame, text=self.app.get_text("runtime_db_path").format(path=db_path or '-'), wraplength=700).pack(anchor='w', pady=(0, 10))
 
         ttk.Label(frame, text=self.app.get_text("runtime_issue_title"), font=(self.app.FONT_FAMILY, self.app.FONT_SIZE_TITLE, 'bold')).pack(anchor='w')
+        # 运行状态摘要/详情来自 latest_runtime_issue，其值由检测线程使用 get_text 构造，
+        # 不可能是“就绪/Ready”文案，故无需对翻译文本做硬编码等价判断。
         summary = issue.get('summary') or self.app.get_text("runtime_issue_none")
         detail = issue.get('detail') or self.app.get_text("runtime_issue_detail_none")
-        if summary == self.app.get_text("app_main_status_ready") or summary in {"就绪", "Ready"}:
-            summary = self.app.get_text("app_main_status_ready")
-        if detail == self.app.get_text("app_main_status_ready") or detail in {"就绪", "Ready"}:
-            detail = self.app.get_text("app_main_status_ready")
         ttk.Label(frame, text=self.app.get_text("runtime_issue_summary").format(summary=summary), wraplength=700).pack(anchor='w', pady=(4, 4))
         ttk.Label(frame, text=self.app.get_text("runtime_issue_level_time").format(level=issue.get('level', 'INFO'), time=issue.get('time', '-'))).pack(anchor='w', pady=(0, 8))
 
@@ -166,18 +165,17 @@ class RuntimeStatusWindow:
 
 
 def load_history(app, mode):
-    """加载指定模式的历史记录到应用状态。"""
-    file_path = app.HISTORY_FILES.get(mode)
-    if not file_path or not os.path.exists(file_path):
-        app.current_history_data = app.ytdlp_manager.history_repo.load()
-        app.current_history_mode = mode
-        return
+    """加载指定模式的历史记录到应用状态。
+
+    当前仅支持 ytdlp 模式；无差异化的 mode 分支已合并为统一路径，
+    由 history_repo.load() 负责 DB 优先、JSON 回退。
+    """
+    repo = getattr(getattr(app, "ytdlp_manager", None), "history_repo", None)
     try:
-        app.current_history_data = app.ytdlp_manager.history_repo.load()
-        app.current_history_mode = mode
+        app.current_history_data = repo.load() if repo is not None else []
     except Exception:
         app.current_history_data = []
-        app.current_history_mode = mode
+    app.current_history_mode = mode
 
 
 

@@ -82,15 +82,30 @@ def write_json_atomic(file_path, payload):
 class WindowPositionRepository:
     def __init__(self, config_file):
         self.config_file = config_file
+        self.backup_file = config_file + ".bak" if config_file else ""
 
-    def load(self):
-        if not os.path.exists(self.config_file):
+    def _read_json(self, path):
+        if not path or not os.path.exists(path):
             return None
         try:
-            with open(self.config_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    def _backup_current(self):
+        try:
+            if os.path.exists(self.config_file):
+                os.replace(self.config_file, self.backup_file)
+        except OSError:
+            pass
+
+    def load(self):
+        data = self._read_json(self.config_file)
+        if data is not None:
+            return data
+        return self._read_json(self.backup_file)
 
     def save(self, root_window, extra_state=None):
         pos = {
@@ -109,6 +124,7 @@ class WindowPositionRepository:
         else:
             if isinstance(existing_ui_state, dict) and existing_ui_state:
                 pos["ui_state"] = existing_ui_state
+        self._backup_current()
         write_json_atomic(self.config_file, pos)
 
     def get_ui_state(self):
@@ -127,4 +143,5 @@ class WindowPositionRepository:
             "width": root_window.winfo_width(),
             "height": root_window.winfo_height(),
         })
+        self._backup_current()
         write_json_atomic(self.config_file, current)

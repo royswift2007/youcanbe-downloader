@@ -1,13 +1,34 @@
 import os
+import sys
 import tkinter as tk
 from tkinter import ttk
 
 
-DEBUG_STARTUP_LOG = os.path.join(os.getcwd(), "startup_debug.log")
+try:
+    if getattr(sys, "frozen", False):
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    base_path = os.getcwd()
+
+
+DEBUG_STARTUP_LOG = os.path.join(base_path, "startup_debug.log")
+DEBUG_STARTUP_LOG_MAX_BYTES = 1024 * 1024
+
+
+def _debug_startup_rotate_if_needed():
+    """启动调试日志超过阈值时做单次清空重写，避免文件无限增长。"""
+    try:
+        if os.path.exists(DEBUG_STARTUP_LOG) and os.path.getsize(DEBUG_STARTUP_LOG) > DEBUG_STARTUP_LOG_MAX_BYTES:
+            os.remove(DEBUG_STARTUP_LOG)
+    except OSError:
+        pass
 
 
 def debug_startup(message):
     try:
+        _debug_startup_rotate_if_needed()
         with open(DEBUG_STARTUP_LOG, "a", encoding="utf-8") as f:
             f.write(message + "\n")
     except Exception:
@@ -172,28 +193,6 @@ def setup_styles(ui_colors, font_family, font_size_normal):
     )
 
     style.configure(
-        "TSpinbox",
-        padding=5,
-        arrowcolor="#999999",
-        arrowsize=10,
-        bordercolor="#e5e5e5",
-        lightcolor="#e5e5e5",
-        darkcolor="#e5e5e5",
-        relief="solid",
-        borderwidth=1,
-        fieldbackground="white",
-    )
-    style.map(
-        "TSpinbox",
-        bordercolor=[('focus', '#e5e5e5')],
-        lightcolor=[('focus', '#e5e5e5')],
-        darkcolor=[('focus', '#e5e5e5')],
-        relief=[('focus', 'solid')],
-        borderwidth=[('focus', 1)],
-    )
-
-
-    style.configure(
         "TCombobox",
         padding=5,
         relief="solid",
@@ -216,7 +215,7 @@ def setup_styles(ui_colors, font_family, font_size_normal):
         relief="solid",
         borderwidth=1,
         bordercolor="#e5e5e5",
-        font=(font_family, font_size_normal + 3),
+        font=(font_family, font_size_normal + 2),
         arrowcolor=ui_colors["text_secondary"],
     )
     style.map(

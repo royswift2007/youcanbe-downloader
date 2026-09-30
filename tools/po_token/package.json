@@ -1,9 +1,12 @@
 {
   "name": "ycb-po-token",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
+  "description": "PO Token generator using bgutils-js (dynamic BotGuard challenge, no static player snapshot)",
+  "type": "module",
   "dependencies": {
-    "global-agent": "^4.1.3",
-    "youtube-po-token-generator": "^0.1.0"
+    "bgutils-js": "^4.0.3",
+    "jsdom": "^29.0.0",
+    "youtubei.js": "^18.1.0"
   }
 }

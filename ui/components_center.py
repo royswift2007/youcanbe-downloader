@@ -26,7 +26,7 @@ class ComponentsCenterWindow:
             except Exception:
                 pass
 
-        get_manager().on_status_change(_handle_pot_status_change)
+        self._pot_status_unsubscribe = get_manager().on_status_change(_handle_pot_status_change)
         self._build()
 
     def _build(self):
@@ -219,6 +219,13 @@ class ComponentsCenterWindow:
             pass
 
     def _close(self):
+        unsubscribe = getattr(self, "_pot_status_unsubscribe", None)
+        if callable(unsubscribe):
+            try:
+                unsubscribe()
+            except Exception:
+                pass
+            self._pot_status_unsubscribe = None
         if self.window.winfo_exists():
             self.window.destroy()
 

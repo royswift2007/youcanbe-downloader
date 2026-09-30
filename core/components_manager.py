@@ -5,7 +5,7 @@ import subprocess
 import time
 
 
-MIN_YTDLP_VERSION = "2024.10.22"
+MIN_YTDLP_VERSION = "2026.03.03"
 MIN_FFMPEG_PREFIX = "ffmpeg version"
 MIN_DENO_VERSION = "1.39"
 
@@ -83,7 +83,15 @@ class ComponentsManager:
     def check_yt_dlp(self):
         path = self.yt_dlp_path
         version, ok, message = self._run_version([path, "--version"], timeout=6)
-        if ok and version:
+        if ok and not version:
+            # --version 成功但 stdout 为空：视为版本未知，避免“正常但无版本号”的矛盾态。
+            ok = False
+            version = "unknown"
+            message = self._t(
+                "components_version_invalid",
+                "{name} version output empty",
+            ).format(name="yt-dlp")
+        elif ok and version:
             if not _parse_numeric_version_parts(version):
                 ok = False
                 message = self._t(

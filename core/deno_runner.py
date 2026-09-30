@@ -51,6 +51,11 @@ def run_deno_script(deno_path, script_path, payload, timeout=6):
             resolved_script,
         ]
     input_payload = json.dumps(payload or {}, ensure_ascii=False)
+    startupinfo = None
+    if sys.platform == "win32":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
     try:
         proc = subprocess.run(
             cmd,
@@ -60,6 +65,7 @@ def run_deno_script(deno_path, script_path, payload, timeout=6):
             timeout=timeout,
             encoding="utf-8",
             errors="replace",
+            startupinfo=startupinfo,
         )
         return {
             "ok": proc.returncode == 0,

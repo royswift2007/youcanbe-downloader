@@ -11,7 +11,9 @@ from core.auth_models import (
     AUTH_LEVEL_WARNING,
     AUTH_REASON_AGE_RESTRICTED,
     AUTH_REASON_BOT_CHECK,
+    AUTH_REASON_BROWSER_COOKIES_FAILED,
     AUTH_REASON_FORBIDDEN,
+    AUTH_REASON_FORMAT_UNAVAILABLE,
     AUTH_REASON_JS_CHALLENGE,
     AUTH_REASON_LOGIN_REQUIRED,
     AUTH_REASON_MEMBERS_ONLY,
@@ -23,7 +25,12 @@ from core.auth_models import (
     AuthDiagnostic,
 )
 from core.cookies_args import build_cookies_args
-from core.po_token_manager import get_manager as get_pot_manager
+from core.po_token_manager import (
+    TOKEN_KEY_PO_TOKEN,
+    TOKEN_KEY_VISITOR_DATA,
+    get_manager as get_pot_manager,
+    normalize_token_payload,
+)
 from core.youtube_models import (
     BATCH_SOURCE_CHANNEL,
     BATCH_SOURCE_PLAYLIST,
@@ -140,7 +147,6 @@ def detect_auth_diagnostic(error_output):
                 "http error 403",
                 "forbidden",
                 "access denied",
-                "requested format is not available",
                 "this video is unavailable",
                 "video unavailable",
                 "not available in your country",
@@ -150,6 +156,17 @@ def detect_auth_diagnostic(error_output):
             "auth_summary_forbidden",
             "auth_action_forbidden",
             True,
+        ),
+        (
+            AUTH_REASON_FORMAT_UNAVAILABLE,
+            [
+                "requested format is not available",
+                "requested formats are not available",
+            ],
+            "ERROR",
+            "auth_summary_format_unavailable",
+            "auth_action_format_unavailable",
+            False,
         ),
         (
             AUTH_REASON_JS_CHALLENGE,
@@ -173,6 +190,24 @@ def detect_auth_diagnostic(error_output):
             "WARNING",
             "auth_summary_bot_check",
             "auth_action_bot_check",
+            True,
+        ),
+        (
+            # 浏览器 cookies 提取失败：Chrome 127+ App-Bound Encryption (DPAPI)、
+            # Chrome 数据库被占用等。这是 yt-dlp 的已知限制（issue #10927/#7271），
+            # 并非用户 cookies 失效，提示用户改用 cookies 文件模式即可。
+            AUTH_REASON_BROWSER_COOKIES_FAILED,
+            [
+                "failed to decrypt with dpapi",
+                "could not copy chrome cookie database",
+                "could not copy chromium cookie database",
+                "unable to decrypt",
+                "database is locked",
+                "could not create temporary directory",
+            ],
+            "ERROR",
+            "auth_summary_browser_cookies_failed",
+            "auth_action_browser_cookies_failed",
             True,
         ),
         (
@@ -390,19 +425,27 @@ def _run_json_command(base_cmd, cookies_path, timeout, startupinfo, cookies_mode
     mode = (cookies_mode or "file").strip().lower()
     browser = (cookies_browser or "").strip().lower()
     cookies_args = build_cookies_args(mode, browser, cookies_path)
-    
-    # [新增] 注入 PO Token 参数
+
+    # 注入 PO Token 参数
+    # 注意：绝不强制 player_client=web！
+    # 实测（yt-dlp 2026.08.19）：强制 web 客户端后，无论 PO Token 是否有效，
+    # YouTube 仅返回 1 个 360p 格式（18），因为 web 客户端的渐进式格式
+    # 需要与 visitor_data 绑定且与视频 ID 绑定的 GVS PO Token（SABR 实验），
+    # 旧式 "web.gvs+TOKEN" 绑定语法无法满足。不指定 player_client 时，
+    # yt-dlp 会自动尝试 tv/web_embedded 等多客户端，全部格式均可获取。
+    # po_token 需 "CLIENT.CONTEXT+TOKEN" 格式（context 缺省时 yt-dlp 假定为 GVS）；
+    # visitor_data 是独立键
     pot_args = []
     if use_po_token:
         manager = get_pot_manager()
-        token_data = manager.get_token()
+        token_data = normalize_token_payload(manager.get_token())
         if token_data:
-            visitor_data = token_data.get("visitorData")
-            po_token = token_data.get("token")
+            visitor_data = token_data.get(TOKEN_KEY_VISITOR_DATA)
+            po_token = token_data.get(TOKEN_KEY_PO_TOKEN)
             if visitor_data and po_token:
                 pot_args = [
                     "--extractor-args",
-                    f"youtube:player_client=web,po_token=visitor_data={visitor_data},po_token={po_token}"
+                    f"youtube:po_token=web.gvs+{po_token};visitor_data={visitor_data}"
                 ]
 
     use_cookies_first = bool(cookies_args and cookies_args[0] == "--cookies-from-browser")
@@ -415,6 +458,18 @@ def _run_json_command(base_cmd, cookies_path, timeout, startupinfo, cookies_mode
             env,
         )
         used_cookies = proc.returncode == 0
+        if proc.returncode != 0 and cookies_path and os.path.exists(cookies_path):
+            # 浏览器 cookies 提取失败（如 Chrome 127+ App-Bound Encryption 的
+            # DPAPI 解密限制、浏览器占用数据库）时，自动回退到 cookies 文件，
+            # 避免整个格式获取流程直接失败。
+            file_proc = _run_subprocess_checked(
+                base_cmd[:-1] + ["--cookies", cookies_path] + pot_args + [base_cmd[-1]],
+                timeout,
+                startupinfo,
+                env,
+            )
+            if file_proc.returncode == 0:
+                return file_proc, True
         return proc, used_cookies
 
     proc = _run_subprocess_checked(
@@ -626,6 +681,17 @@ class YouTubeMetadataService:
                 env,
             )
             used_cookies = title_proc.returncode == 0
+            if title_proc.returncode != 0 and self.cookies_file_path and os.path.exists(self.cookies_file_path):
+                # 浏览器 cookies 提取失败时自动回退到 cookies 文件
+                file_proc = _run_subprocess_checked(
+                    title_cmd[:-1] + ["--cookies", self.cookies_file_path] + [title_cmd[-1]],
+                    30,
+                    self.startupinfo,
+                    env,
+                )
+                if file_proc.returncode == 0:
+                    title_proc = file_proc
+                    used_cookies = True
         else:
             title_proc = _run_subprocess_checked(
                 title_cmd,
@@ -646,7 +712,12 @@ class YouTubeMetadataService:
 
         title = None
         if title_proc.returncode == 0 and title_proc.stdout:
-            parsed_title = _decode_bytes(title_proc.stdout).strip().split('\n')[0]
+            title_lines = [
+                line.strip()
+                for line in _decode_bytes(title_proc.stdout).splitlines()
+                if line.strip()
+            ]
+            parsed_title = " ".join(title_lines) if title_lines else ""
             if parsed_title:
                 title = parsed_title
 

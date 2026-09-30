@@ -42,6 +42,4 @@ class DownloadTab(ttk.Frame):
         input_frame = self.input_frame_class(scroll_frame, self.manager, self.app)
         input_frame.pack(fill='both', expand=True, pady=(0, 0))
         if hasattr(self.app, 'register_input_frame'):
-            self.app.register_input_frame(input_frame)
-
-        self.manager.input_frame = input_frame
+            self.app.register_input_frame(input_frame, tab=self)

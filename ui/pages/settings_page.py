@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from core.po_token_manager import get_manager as _get_pot_manager
+from ui.i18n import MAIN_STATUS_READY
 
 
 class SettingsPage(ttk.Frame):
@@ -156,7 +157,7 @@ class SettingsPage(ttk.Frame):
                 lbl.pack(side="left")
                 return lbl
 
-        if (self.app.main_status_var.get() or "").strip() == "就绪":
+        if getattr(self.app, "main_status_code", "") == MAIN_STATUS_READY:
             self.app.main_status_var.set(self.app.get_text("app_main_status_ready"))
         self.main_status_label = add_status_item(status_grid, 0, 0, self.app.main_status_var)
         self.auth_status_label = add_status_item(status_grid, 0, 1, self.app.auth_status_var, is_var=True)

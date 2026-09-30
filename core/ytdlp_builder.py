@@ -1,12 +1,25 @@
+import logging
 import os
 
 from core.advanced_args_policy import parse_and_validate_advanced_args
 from core.cookies_args import build_cookies_args
 from core.youtube_models import AUDIO_FMT
-from core.po_token_manager import get_manager as _get_pot_manager
+from core.po_token_manager import (
+    TOKEN_KEY_PO_TOKEN,
+    TOKEN_KEY_VISITOR_DATA,
+    get_manager as _get_pot_manager,
+    normalize_token_payload,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
+    """构建 yt-dlp 命令，并返回 (cmd, applied_cookies_mode)。
+
+    返回 applied_cookies_mode 而非在构建函数内 setattr 修改 task 对象，
+    由调用方决定是否落盘到 task，避免构建函数的隐式副作用。
+    """
     output_dir = task.resolve_output_dir() if hasattr(task, "resolve_output_dir") else task.save_path
     custom_name = task.profile.custom_filename
     if custom_name:
@@ -23,10 +36,13 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
     cookies_mode = (getattr(task.profile, "cookies_mode", "file") or "file").strip().lower()
     cookies_browser = (getattr(task.profile, "cookies_browser", "") or "").strip().lower()
     cookies_args = build_cookies_args(cookies_mode, cookies_browser, cookies_file_path)
-    if cookies_mode == "browser":
+    applied_cookies_mode = "none"
+    if cookies_mode == "browser" and cookies_args:
         cmd.extend(cookies_args)
+        applied_cookies_mode = "browser"
     elif task.needs_cookies and cookies_args:
         cmd.extend(cookies_args)
+        applied_cookies_mode = "file"
 
     fmt = task.profile.format
     sub_lang = task.profile.sub_lang
@@ -156,19 +172,29 @@ def build_ytdlp_command(yt_dlp_path, ffmpeg_path, cookies_file_path, task):
             raise ValueError(f"高级参数无效: {error_message}")
         cmd.extend(advanced_tokens)
 
-    # PO Token 注入（方案 B）
+    # PO Token 注入
+    # 注意：绝不强制 player_client=web！
+    # 实测（yt-dlp 2026.08.19）：强制 web 客户端后，无论 PO Token 是否有效，
+    # YouTube 仅返回 1 个 360p 格式（18）。不指定 player_client 时，yt-dlp 会
+    # 自动尝试 tv/web_embedded 等多客户端，全部格式均可获取。
+    # yt-dlp 语法：多个参数用分号分隔；po_token 需 "CLIENT.CONTEXT+TOKEN" 格式
+    # （context 缺省时 yt-dlp 假定为 GVS）；visitor_data 是独立键
     use_po_token = bool(getattr(task.profile, "use_po_token", False))
     if use_po_token:
         pot_manager = _get_pot_manager()
-        token_data = pot_manager.get_token()
+        token_data = normalize_token_payload(pot_manager.get_token())
         if token_data:
-            visitor_data = token_data.get("visitor_data", "")
-            po_token = token_data.get("po_token", "")
+            visitor_data = token_data.get(TOKEN_KEY_VISITOR_DATA, "")
+            po_token = token_data.get(TOKEN_KEY_PO_TOKEN, "")
             if visitor_data and po_token:
                 cmd.extend([
                     "--extractor-args",
-                    f"youtube:player_client=web,po_token=visitor_data={visitor_data},po_token={po_token}"
+                    f"youtube:po_token=web.gvs+{po_token};visitor_data={visitor_data}"
                 ])
+            else:
+                logger.warning("PO Token 数据不完整，将以无 PO Token 模式运行（YouTube 可能返回 403 或要求验证）")
+        else:
+            logger.warning("PO Token 不可用（生成失败或未就绪），将以无 PO Token 模式运行（YouTube 可能返回 403 或要求验证）")
 
     cmd.append(task.url)
-    return cmd
+    return cmd, applied_cookies_mode

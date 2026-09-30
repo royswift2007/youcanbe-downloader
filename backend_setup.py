@@ -1,3 +1,11 @@
+"""YCB 组件安装器（已废弃，未接线）。
+
+说明：
+    - 主程序的「组件更新」只通过 `ui/app_actions.py::update_components()` 内联 urllib 实现。
+    - 本文件与 `build/backend_setup/`、`build/component_downloader/` 均无任何主程序 subprocess 入口。
+    - 保留仅为历史构建脚本参考，维护时请勿当作有效更新路径修改。
+"""
+
 import argparse
 import configparser
 import json
@@ -72,19 +80,35 @@ class DirectoryError(InstallerError):
 class ConsoleLogger:
     def __init__(self, log_file: str = ""):
         self.log_file = os.path.abspath(log_file) if log_file else ""
+        self._handle = None
         if self.log_file:
             parent = os.path.dirname(self.log_file)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            with open(self.log_file, "w", encoding="utf-8") as f:
-                f.write("")
+            # 复用文件句柄，避免每次 log 都 open/close。
+            try:
+                self._handle = open(self.log_file, "a", encoding="utf-8")
+            except OSError:
+                self._handle = None
 
     def log(self, message: str):
         line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
         print(line, flush=True)
-        if self.log_file:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+        if self._handle is not None:
+            try:
+                self._handle.write(line + "\n")
+                self._handle.flush()
+            except OSError:
+                pass
+
+    def close(self):
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            finally:
+                self._handle = None
 
 
 class _CaseConfigParser(configparser.ConfigParser):
@@ -567,8 +591,6 @@ def download_file(url: str, target_path: str, timeout: int, progress_callback=No
                 downloaded += len(chunk)
                 if callable(progress_callback):
                     progress_callback(downloaded, total_size)
-        if os.path.exists(target_path):
-            os.remove(target_path)
         replace_file_with_retry(temp_path, target_path)
     except Exception:
         try:
@@ -594,8 +616,6 @@ def extract_zip_member(zip_path: str, match_name: str, target_path: str):
         temp_path = target_path + ".tmp"
         with zf.open(candidate) as src, open(temp_path, "wb") as dst:
             shutil.copyfileobj(src, dst)
-        if os.path.exists(target_path):
-            os.remove(target_path)
         replace_file_with_retry(temp_path, target_path)
 
 

@@ -10,7 +10,19 @@ import shutil
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from ui.i18n import MAIN_STATUS_READY
+
 BROWSER_COOKIES_CHOICES = ("chrome", "edge", "firefox")
+
+
+def _set_main_status(app, text, code=""):
+    """统一设置主状态栏，优先走 app.set_main_status，否则回退到直接改 StringVar。"""
+    setter = getattr(app, "set_main_status", None)
+    if callable(setter):
+        setter(text, code=code)
+    else:
+        app.main_status_var.set(text)
+        app.main_status_code = code
 
 
 def choose_directory(app):
@@ -129,34 +141,58 @@ def _center_dialog(dialog):
 
 
 def _download_with_progress(url, target_path, progress_cb=None, timeout=20):
-    def report(block_count, block_size, total_size):
-        downloaded = block_count * block_size
-        if progress_cb:
-            progress_cb(downloaded, total_size)
-
     tmp_path = target_path + ".tmp"
     if os.path.exists(tmp_path):
         os.remove(tmp_path)
 
-    urllib.request.urlretrieve(url, tmp_path, reporthook=report)
-    os.replace(tmp_path, target_path)
-    return target_path
+    request = urllib.request.Request(url, headers={"User-Agent": "YCB-Component-Updater/1.0"})
+    downloaded = 0
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response, open(tmp_path, "wb") as out_file:
+            total_size = int(response.headers.get("Content-Length", "0") or "0")
+            while True:
+                chunk = response.read(64 * 1024)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                downloaded += len(chunk)
+                if progress_cb:
+                    progress_cb(downloaded, total_size)
+        os.replace(tmp_path, target_path)
+        return target_path
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def _extract_zip_member(zip_path, match_name, target_path):
+    temp_target = target_path + ".tmp"
+    if os.path.exists(temp_target):
+        os.remove(temp_target)
     with zipfile.ZipFile(zip_path, "r") as zf:
         members = zf.namelist()
         candidate = None
         lowered = match_name.lower()
         for name in members:
-            if name.lower().endswith(lowered):
+            normalized = name.replace("\\", "/").strip()
+            if normalized.endswith("/"):
+                continue
+            if "/../" in f"/{normalized}" or normalized.startswith("../"):
+                continue
+            if normalized.lower().endswith(lowered):
                 candidate = name
                 break
         if not candidate:
             raise RuntimeError(f"zip_missing:{match_name}")
-        with zf.open(candidate) as src, open(target_path + ".tmp", "wb") as dst:
+        with zf.open(candidate) as src, open(temp_target, "wb") as dst:
             shutil.copyfileobj(src, dst)
-        os.replace(target_path + ".tmp", target_path)
+        if not os.path.exists(temp_target) or os.path.getsize(temp_target) <= 0:
+            raise RuntimeError(f"zip_extract_invalid:{match_name}")
+        os.replace(temp_target, target_path)
     return target_path
 
 
@@ -183,15 +219,10 @@ def _safe_ui_update(app, progress_ui, text=None, percent=None):
         pass
 
 
-def _ensure_component(app, base_dir, name, progress_ui):
-    source = COMPONENT_SOURCES.get(name)
-    if not source:
-        raise RuntimeError(f"unknown_component:{name}")
-
+def _stage_component_download(app, source, name, temp_dir, progress_ui):
     url = source["url"]
     kind = source["type"]
     filename = source["filename"]
-    target_path = os.path.join(base_dir, filename)
 
     _safe_ui_update(
         app,
@@ -208,19 +239,42 @@ def _ensure_component(app, base_dir, name, progress_ui):
         percent = min(100.0, downloaded / total * 100.0) if total > 0 else None
         _safe_ui_update(app, progress_ui, text=text, percent=percent)
 
+    staged_path = os.path.join(temp_dir, filename)
     if kind == "binary":
-        _download_with_progress(url, target_path, progress_cb=on_progress)
-        return target_path
+        _download_with_progress(url, staged_path, progress_cb=on_progress, timeout=20)
+    elif kind == "zip":
+        zip_path = os.path.join(temp_dir, f"{name}.zip")
+        _download_with_progress(url, zip_path, progress_cb=on_progress, timeout=20)
+        match_name = source.get("zip_match") or filename
+        _extract_zip_member(zip_path, match_name, staged_path)
+    else:
+        raise RuntimeError(f"unknown_component_type:{kind}")
+    return staged_path
 
-    if kind == "zip":
-        with tempfile.TemporaryDirectory() as temp_dir:
-            zip_path = os.path.join(temp_dir, f"{name}.zip")
-            _download_with_progress(url, zip_path, progress_cb=on_progress)
-            match_name = source.get("zip_match") or filename
-            _extract_zip_member(zip_path, match_name, target_path)
-        return target_path
 
-    raise RuntimeError(f"unknown_component_type:{kind}")
+def _validate_staged_component(name, staged_path):
+    if not os.path.exists(staged_path) or os.path.getsize(staged_path) <= 0:
+        raise RuntimeError(f"component_stage_invalid:{name}")
+    return staged_path
+
+
+def _install_staged_component(base_dir, filename, staged_path):
+    target_path = os.path.join(base_dir, filename)
+    os.makedirs(base_dir, exist_ok=True)
+    os.replace(staged_path, target_path)
+    return target_path
+
+
+def _ensure_component(app, base_dir, name, progress_ui):
+    source = COMPONENT_SOURCES.get(name)
+    if not source:
+        raise RuntimeError(f"unknown_component:{name}")
+
+    filename = source["filename"]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        staged_path = _stage_component_download(app, source, name, temp_dir, progress_ui)
+        _validate_staged_component(name, staged_path)
+        return _install_staged_component(base_dir, filename, staged_path)
 
 
 def _refresh_component_paths(app, base_dir):
@@ -259,15 +313,19 @@ def _get_component_target_dir(app, fallback_dir):
 
 
 def update_components(app, base_dir, components=None):
-    """更新或下载 yt-dlp/ffmpeg/deno 单文件到程序根目录。"""
+    """更新或下载 yt-dlp/ffmpeg/deno 单文件到程序根目录。
+
+    这是「组件更新」的唯一有效实现入口；`backend_setup.py` 与 build/backend_setup、
+    build/component_downloader 均为废弃死代码，请勿改用或维护。
+    """
     if getattr(app, 'yt_dlp_update_in_progress', False):
-        app.main_status_var.set(app.get_text("app_yt_dlp_updating"))
+        _set_main_status(app, app.get_text("app_yt_dlp_updating"))
         return
 
     selected = components or ["yt-dlp", "ffmpeg", "deno"]
     target_dir = _get_component_target_dir(app, base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    app.main_status_var.set(app.get_text("components_update_start"))
+    _set_main_status(app, app.get_text("components_update_start"))
     app.yt_dlp_update_in_progress = True
 
     progress_ui = _make_progress_dialog(app, "components_update_title", app.get_text("components_update_start"))
@@ -275,7 +333,7 @@ def update_components(app, base_dir, components=None):
 
     def finish(status_text):
         app.yt_dlp_update_in_progress = False
-        app.main_status_var.set(status_text)
+        _set_main_status(app, status_text)
         try:
             if progress_ui.get("dialog"):
                 progress_ui["dialog"].destroy()
@@ -316,7 +374,7 @@ def update_components(app, base_dir, components=None):
             app.get_text("common_error"),
             app.get_text("components_update_start_fail").format(error=exc),
         )
-        app.main_status_var.set(app.get_text("topbar_runtime_ok"))
+        _set_main_status(app, app.get_text("topbar_runtime_ok"))
 
 
 def update_yt_dlp(app, yt_dlp_path):
@@ -435,6 +493,6 @@ def repair_po_token(app):
     try:
         current_main_status = (app.main_status_var.get() or "").strip()
         if "PO Token" in current_main_status:
-            app.main_status_var.set(app.get_text("app_main_status_ready"))
+            _set_main_status(app, app.get_text("app_main_status_ready"), code=MAIN_STATUS_READY)
     except Exception:
         pass

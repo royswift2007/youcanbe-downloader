@@ -20,9 +20,11 @@ AUTH_REASON_PRIVATE_VIDEO = "private_video"
 AUTH_REASON_MEMBERS_ONLY = "members_only"
 AUTH_REASON_PAYMENT_REQUIRED = "payment_required"
 AUTH_REASON_FORBIDDEN = "forbidden"
+AUTH_REASON_FORMAT_UNAVAILABLE = "format_unavailable"
 AUTH_REASON_JS_CHALLENGE = "js_challenge"
 AUTH_REASON_BOT_CHECK = "bot_check"
 AUTH_REASON_NETWORK = "network"
+AUTH_REASON_BROWSER_COOKIES_FAILED = "browser_cookies_failed"
 AUTH_REASON_UNKNOWN = "unknown"
 
 

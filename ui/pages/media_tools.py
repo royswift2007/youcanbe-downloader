@@ -4,6 +4,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog
 
@@ -357,15 +358,43 @@ class MediaToolsPage(ttk.Frame):
         return f"{base}_output{ext}"
 
     def _refresh_media_info(self, input_path):
+        """异步解析媒体信息：探测（subprocess）移至后台线程，结果回填 UI。"""
         if not getattr(self, "media_info_var", None):
             return
         if not input_path:
             self.media_info_var.set(self.app.get_text("media_info_pending"))
             return
+        if getattr(self, "_media_probe_in_progress", False):
+            return
+        self._media_probe_in_progress = True
+        self.media_info_var.set(self.app.get_text("media_info_pending"))
+
+        def run_probe():
+            try:
+                text = self._probe_media_info_text(input_path)
+            except Exception:
+                text = self.app.get_text("media_info_parse_failed")
+            try:
+                self.app.root.after(0, self._apply_media_probe_result, text)
+            except Exception:
+                pass
+
+        threading.Thread(target=run_probe, daemon=True).start()
+
+    def _apply_media_probe_result(self, text):
+        """在 UI 线程回填探测结果并复位防重入标志。"""
+        try:
+            self._media_probe_in_progress = False
+            if getattr(self, "media_info_var", None):
+                self.media_info_var.set(text)
+        except Exception:
+            pass
+
+    def _probe_media_info_text(self, input_path):
+        """纯计算探测结果文本（在线程中调用），不触碰任何 UI 控件。"""
         ffprobe = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
         if not ffprobe:
-            self._refresh_media_info_without_ffprobe(input_path)
-            return
+            return self._probe_media_info_without_ffprobe(input_path)
         cmd = [
             ffprobe,
             "-v",
@@ -379,25 +408,24 @@ class MediaToolsPage(ttk.Frame):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
             if result.returncode != 0:
-                self.media_info_var.set(self.app.get_text("media_info_parse_failed"))
-                return
+                return self.app.get_text("media_info_parse_failed")
             payload = json.loads(result.stdout or "{}")
         except Exception:
-            self.media_info_var.set(self.app.get_text("media_info_parse_failed"))
-            return
+            return self.app.get_text("media_info_parse_failed")
         fmt = payload.get("format", {}) if isinstance(payload, dict) else {}
         duration = fmt.get("duration") or "-"
         size = fmt.get("size") or "-"
         bitrate = fmt.get("bit_rate") or "-"
         stream_count = len(payload.get("streams", []) or []) if isinstance(payload, dict) else 0
-        self.media_info_var.set(self.app.get_text("media_info_summary").format(
+        return self.app.get_text("media_info_summary").format(
             duration=duration,
             size=size,
             bitrate=bitrate,
             streams=stream_count,
-        ))
+        )
 
-    def _refresh_media_info_without_ffprobe(self, input_path):
+    def _probe_media_info_without_ffprobe(self, input_path):
+        """无 ffprobe 时用 ffmpeg 探测，返回结果文本（线程中调用）。"""
         file_size = "-"
         try:
             file_size = str(os.path.getsize(input_path))
@@ -406,8 +434,7 @@ class MediaToolsPage(ttk.Frame):
 
         ffmpeg = getattr(self.manager, "ffmpeg_path", "") or shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
         if not ffmpeg:
-            self.media_info_var.set(self.app.get_text("media_info_no_ffprobe"))
-            return
+            return self.app.get_text("media_info_no_ffprobe")
 
         cmd = [ffmpeg, "-i", input_path]
         duration = "-"
@@ -424,15 +451,14 @@ class MediaToolsPage(ttk.Frame):
                 bitrate = bitrate_match.group(1)
             stream_count = len(re.findall(r"^\s*Stream #", probe_text, flags=re.MULTILINE))
         except Exception:
-            self.media_info_var.set(self.app.get_text("media_info_no_ffprobe"))
-            return
+            return self.app.get_text("media_info_no_ffprobe")
 
-        self.media_info_var.set(self.app.get_text("media_info_summary").format(
+        return self.app.get_text("media_info_summary").format(
             duration=duration,
             size=file_size,
             bitrate=bitrate,
             streams=stream_count or "-",
-        ))
+        )
 
     def _refresh_visibility(self):
         job_type = self.job_type_var.get().strip()

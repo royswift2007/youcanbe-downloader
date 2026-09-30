@@ -5,6 +5,15 @@ import time
 from ui.input_validators import sync_output_format_by_preset, validate_format_fetch_request
 
 
+def format_count_separated(count):
+    """locale 无关的千分位格式化：与系统 locale 脱钩，保证观看数显示一致。"""
+    try:
+        num = int(count or 0)
+    except (TypeError, ValueError):
+        num = 0
+    return f"{num:_}".replace("_", ",")
+
+
 def _t(frame, key, fallback=""):
     app = getattr(frame, "app", None)
     getter = getattr(app, "get_text", None)
@@ -100,10 +109,6 @@ def fetch_formats_async(frame):
     frame._format_fetch_in_progress = True
     if getattr(frame, "fetch_formats_button", None):
         frame.fetch_formats_button.configure(state="disabled")
-    frame.format_fetch_used_cookies = False
-    frame._format_fetch_in_progress = True
-    if getattr(frame, "fetch_formats_button", None):
-        frame.fetch_formats_button.configure(state="disabled")
 
     def finish_fetch():
         frame._format_fetch_in_progress = False
@@ -170,7 +175,7 @@ def _format_duration(seconds):
 def _format_views(frame, view_count):
     count = int(view_count or 0)
     if count:
-        return f"{count:,}"
+        return format_count_separated(count)
     return _t(frame, "format_view_unknown", "未知")
 
 

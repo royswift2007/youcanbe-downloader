@@ -11,7 +11,7 @@ import queue
 import time
 import shutil
 
-from core.auth_models import CookiesStatus
+from core.auth_models import AUTH_STATUS_MISSING, CookiesStatus
 
 from core.download_manager import YouTubeDownloadManager
 from core.media_jobs import MediaJobManager
@@ -48,7 +48,7 @@ from ui.pages.single_video import UnifiedVideoInputFrame
 from ui.app_shell import BottomBar
 from ui.pages.settings_page import SettingsPage
 from ui.components_center import ComponentsCenterWindow
-from ui.i18n import DEFAULT_LANG, normalize_lang, tr
+from ui.i18n import DEFAULT_LANG, MAIN_STATUS_READY, normalize_lang, tr
 
 
 PANE_CONFIG_KEY_SINGLE_VIDEO = "single_video"
@@ -127,10 +127,13 @@ def get_resource_path(relative_path):
 
 
 def _safe_int_config(raw_value, default_value, min_value=0):
-    try:
-        value = int((raw_value or str(default_value)).strip() or default_value)
-    except (TypeError, ValueError, AttributeError):
+    if raw_value is None or str(raw_value).strip() == "":
         value = default_value
+    else:
+        try:
+            value = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            value = default_value
     return max(min_value, value)
 
 def _is_executable_file(path):
@@ -171,8 +174,8 @@ CONFIG_FILE = os.path.join(APP_DATA_DIR, "window_pos.json")  # 窗口位置配�
 INSTALLER_PREFS_FILE = os.path.join(base_path, "install_prefs.json")
 INSTALLER_PREFS_SENTINEL = os.path.join(APP_DATA_DIR, ".installer_lang_consumed")
 
-# [新增] Cookies 文件路径定义
-COOKIES_DEFAULT_PATH = os.path.join(APP_DATA_DIR, "www.youtube.com_cookies.txt")  # YouTube Cookies文件路径
+# [新增] Cookies 文件路径定义（跟随安装目录 base_path，与组件二进制解析保持一致）
+COOKIES_DEFAULT_PATH = os.path.join(base_path, "www.youtube.com_cookies.txt")  # YouTube Cookies文件路径
 
 startupinfo = None
 if os.name == "nt":
@@ -321,7 +324,11 @@ def load_window_pos(root_window, position_repo):
             root_window.geometry(f"{width}x{height}+{x}+{y}")
             return
 
-        geo = f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}"
+        pos_width = int(pos.get('width', 1650) or 1650)
+        pos_height = int(pos.get('height', 1000) or 1000)
+        pos_x = int(pos.get('x', 0) or 0)
+        pos_y = int(pos.get('y', 0) or 0)
+        geo = f"{pos_width}x{pos_height}+{pos_x}+{pos_y}"
         root_window.geometry(geo)
     except Exception as exc:
         _debug_exception("load_window_pos failed", exc)
@@ -442,18 +449,20 @@ class DownloadApplication:
     def _init_shared_vars(self):
         self.shared_save_dir_var = tk.StringVar(value=LAST_SAVE_PATH_DEFAULT)
         self.main_status_var = tk.StringVar(value=self.get_text("app_main_status_ready"))
+        self.main_status_code = MAIN_STATUS_READY
         self.auth_status_var = tk.StringVar(value="")
         self.runtime_status_var = tk.StringVar(value="")
         self.pot_status_var = tk.StringVar(value="")
         self.cookies_error_notified = False
         self.latest_auth_diagnostic = None
-        cookies_path = self.get_ui_state_value("cookies", "file_path", default=COOKIES_DEFAULT_PATH)
-        if not cookies_path:
-            cookies_path = COOKIES_DEFAULT_PATH
-        self.COOKIES_FILE_PATH = cookies_path
+        # Cookies 一律跟随程序目录（base_path），不再读取 window_pos.json 里可能固化的旧绝对路径。
+        # 否则程序整体移动到新目录后，旧路径仍存在时会被持续沿用，导致读取到旧的开发目录。
+        self.COOKIES_FILE_PATH = COOKIES_DEFAULT_PATH
+        debug_startup(f"cookies_file={self.COOKIES_FILE_PATH}")
         self.latest_cookies_status = CookiesStatus(file_path=self.COOKIES_FILE_PATH)
         self.latest_runtime_issue = None
         self.input_frames = []
+        self._tab_frame_map = {}
         self.clipboard_watch_var = tk.BooleanVar(value=self.get_ui_state_value("clipboard", "watch", default=False))
         self.clipboard_auto_parse_var = tk.BooleanVar(value=self.get_ui_state_value("clipboard", "auto_parse", default=False))
         self.clipboard_last_text = ""
@@ -464,7 +473,7 @@ class DownloadApplication:
         self.cookies_browser_var = tk.StringVar(value=self.get_ui_state_value("cookies", "browser", default=""))
         self.download_retry_var = tk.StringVar(value=str(self.get_ui_state_value("downloads", "retry", default=3)))
         self.download_concurrent_var = tk.StringVar(value=str(self.get_ui_state_value("downloads", "concurrent", default=1)))
-        self.download_speed_limit_var = tk.StringVar(value=str(self.get_ui_state_value("downloads", "speed_limit", default="2")))
+        self.download_speed_limit_var = tk.StringVar(value=str(self.get_ui_state_value("downloads", "speed_limit", default="0")))
         self.use_po_token_var = tk.BooleanVar(value=self.get_ui_state_value("pot", "enabled", default=False))
         
         self.cookies_mode_var.trace_add('write', lambda *_args: self._on_cookies_setting_change())
@@ -566,11 +575,13 @@ class DownloadApplication:
             browser = (self.cookies_browser_var.get() or "").strip()
             
             text = ""
+            missing_optional = getattr(status, "status", "") == AUTH_STATUS_MISSING
             if diagnostic and not diagnostic.ok:
                 summary = (getattr(diagnostic, "summary", "") or "").strip()
-                summary = self.get_text(summary, summary)
-                if summary == "未检测到本地 Cookies 文件 (选填)":
+                if missing_optional:
                     summary = self.get_text("app_cookies_missing_optional")
+                else:
+                    summary = self.get_text(summary, summary)
                 text = self.get_text("topbar_auth_error").format(summary=summary)
             elif mode == "browser":
                 text = self.get_text("topbar_auth_browser").format(browser=browser or "-")
@@ -578,9 +589,10 @@ class DownloadApplication:
                 text = self.get_text("topbar_auth_file_configured")
             elif status and getattr(status, "last_message", "") and status.last_message != self.get_text("auth_last_check_none"):
                 message = (status.last_message or "").strip()
-                message = self.get_text(message, message)
-                if message == "未检测到本地 Cookies 文件 (选填)":
+                if missing_optional:
                     message = self.get_text("app_cookies_missing_optional")
+                else:
+                    message = self.get_text(message, message)
                 text = self.get_text("topbar_auth_last_message").format(message=message)
             else:
                 text = self.get_text("topbar_auth_unconfigured")
@@ -594,8 +606,8 @@ class DownloadApplication:
         issue = getattr(self, "latest_runtime_issue", None) or {}
         summary = (issue.get("summary") or "").strip()
         
-        # 优化显示逻辑，不再尝试对此处已翻译的内容进行二次翻译匹配
-        if not summary or summary == "就绪" or summary.lower() == "ready" or summary == self.get_text("app_main_status_ready"):
+        # latest_runtime_issue 的 summary 由检测线程使用 get_text 构造；无 issue 时为空。
+        if not summary:
             text = self.get_text("topbar_runtime_ok")
         else:
             # 如果 summary 已经是带翻译键构造的 (如 "发布资源缺失: ...")，直接显示即可
@@ -616,6 +628,7 @@ class DownloadApplication:
             "retry_wait": "⏳",
             "ready": "✅",
             "error": "❌",
+            "gave_up": "⛔",
             "disabled": "",
         }
         icon = icons.get(code, "⏳")
@@ -631,6 +644,8 @@ class DownloadApplication:
             text = self.get_text("pot_status_installing").format(icon=icon)
         elif code == "retry_wait":
             text = self.get_text("pot_status_retry_wait").format(icon=icon)
+        elif code == "gave_up":
+            text = self.get_text("pot_status_gave_up").format(icon=icon)
         elif code == "error":
             text = self.get_text("pot_status_error").format(icon=icon)
         else:
@@ -707,11 +722,15 @@ class DownloadApplication:
         """创建底部保存路径栏"""
         self.bottom_bar = BottomBar(self.root, self)
 
-    def register_input_frame(self, frame):
-        """登记输入页实例，供关闭保护统一检查页面状态。"""
+    def register_input_frame(self, frame, tab=None):
+        """登记输入页实例，供关闭保护统一检查页面状态。
+
+        ``tab`` 为该输入页所在的外层 Notebook 标签容器，用于映射「当前标签页 → 输入页」。
+        """
         if frame and frame not in self.input_frames:
             self.input_frames.append(frame)
-        self.ytdlp_manager.input_frame = frame
+        if tab is not None:
+            self._tab_frame_map[str(tab)] = frame
         if frame and getattr(frame, "clipboard_auto_parse_var", None) is None:
             frame.clipboard_auto_parse_var = self.clipboard_auto_parse_var
         if frame and getattr(frame, "cookies_mode_var", None):
@@ -743,6 +762,11 @@ class DownloadApplication:
 
     def get_text(self, key, fallback=""):
         return tr(key, self.current_lang, fallback=fallback)
+
+    def set_main_status(self, text, code=""):
+        """统一设置主状态栏文本与语义状态码（避免调用方直接改 StringVar 后语义丢失）。"""
+        self.main_status_var.set(text)
+        self.main_status_code = code
 
     def set_language(self, lang_code):
         normalized = normalize_lang(lang_code)
@@ -790,6 +814,7 @@ class DownloadApplication:
                 setattr(self, attr_name, None)
 
         self.input_frames = []
+        self._tab_frame_map = {}
         self._create_bottom_bar()
         self._create_notebook()
         try:
@@ -827,7 +852,6 @@ class DownloadApplication:
             self.default_use_po_token = bool(self.use_po_token_var.get())
             self.set_ui_state_value("cookies", "mode", value=self.default_cookies_mode)
             self.set_ui_state_value("cookies", "browser", value=self.default_browser_cookies)
-            self.set_ui_state_value("cookies", "file_path", value=self.COOKIES_FILE_PATH)
             self.set_ui_state_value("pot", "enabled", value=self.default_use_po_token)
             self.set_ui_state_value("clipboard", "watch", value=bool(self.clipboard_watch_var.get()))
             self.set_ui_state_value("clipboard", "auto_parse", value=bool(self.clipboard_auto_parse_var.get()))
@@ -899,14 +923,7 @@ class DownloadApplication:
         current = None
         if getattr(self, "notebook", None):
             current = self.notebook.select()
-        active_frame = None
-        for frame in self.input_frames:
-            try:
-                if frame and str(frame) == str(current):
-                    active_frame = frame
-                    break
-            except Exception:
-                continue
+        active_frame = getattr(self, "_tab_frame_map", {}).get(str(current))
         if active_frame:
             self._sync_settings_state(source="frame", frame=active_frame)
 
@@ -1035,7 +1052,7 @@ class DownloadApplication:
                 "INFO",
             )
             
-            # 状态变更监听：直接在日志更新
+            # 状态变更监听：直接在日志更新（重复状态由管理器统一去重，不再刷屏）
             pot_manager.on_status_change(
                 lambda code, message: self.ytdlp_manager.log(
                     self.get_text("app_pot_status_update").format(status=code, message=message),
@@ -1074,11 +1091,27 @@ class DownloadApplication:
             # 只有真正的“等待中”才计入退出提示的等待数
             waiting_count = sum(1 for t in self.ytdlp_manager.task_queue if getattr(t, "status", None) == TASK_STATUS_WAITING)
 
+        media_running_count = 0
+        if getattr(self, "media_manager", None):
+            with self.media_manager._state_lock:
+                media_running_count = len(self.media_manager.running_jobs)
+
+        po_token_busy = False
+        try:
+            from core.po_token_manager import get_manager as _get_pot_manager, STATUS_INSTALLING
+            po_token_busy = _get_pot_manager().get_status()[0] == STATUS_INSTALLING
+        except Exception:
+            pass
+
         busy_states = []
         if running_count > 0:
             busy_states.append(self.get_text("close_busy_running").format(count=running_count))
         if waiting_count > 0:
             busy_states.append(self.get_text("close_busy_waiting").format(count=waiting_count))
+        if media_running_count > 0:
+            busy_states.append(self.get_text("close_busy_media_running").format(count=media_running_count))
+        if po_token_busy:
+            busy_states.append(self.get_text("close_busy_po_token"))
         if self.yt_dlp_update_in_progress:
             busy_states.append(self.get_text("close_busy_updating"))
 
@@ -1127,6 +1160,8 @@ class DownloadApplication:
 
             self.ytdlp_manager.save_pending_tasks()
             self.ytdlp_manager.stop_all()
+            if getattr(self, "media_manager", None):
+                self.media_manager.stop_all()
             self.root.after(200, self._finalize_close)
             return
 
@@ -1140,8 +1175,24 @@ class DownloadApplication:
         if getattr(self, "_close_finalized", False):
             return
         self._close_finalized = True
+        # 关闭前统一停止 media 任务与 po_token 后台线程，避免孤儿进程
+        if getattr(self, "media_manager", None):
+            try:
+                self.media_manager.stop_all()
+            except Exception:
+                pass
         try:
-            self.save_ui_state()
+            from core.po_token_manager import get_manager as _get_pot_manager
+            _get_pot_manager().request_stop()
+        except Exception:
+            pass
+        try:
+            self.ytdlp_manager.stop_all()
+        except Exception:
+            pass
+        try:
+            # 单一落盘入口：save_window_pos 内部通过 position_repo.save 一次写窗口位置与 ui_state，
+            # 避免再调用 save_ui_state() 造成对 window_pos.json 的双重原子写。
             save_window_pos(self.root, self.position_repo, extra_state=self.ui_state)
         finally:
             self.root.destroy()

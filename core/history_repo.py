@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 
 from core.settings import write_json_atomic
 
@@ -33,10 +34,20 @@ class YouTubeHistoryRepository:
         self._db_retry_delay = 0.15
         self._init_db()
 
+    @contextmanager
+    def _get_conn(self):
+        """统一 SQLite 连接上下文：正常退出 commit，异常不 commit，始终 close。"""
+        conn = sqlite3.connect(self.db_path, timeout=2.0)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
     def _init_db(self):
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_conn() as conn:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS youtube_download_history (
@@ -61,7 +72,14 @@ class YouTubeHistoryRepository:
                         failure_detail TEXT,
                         return_code INTEGER,
                         created_at TEXT NOT NULL,
-                        source TEXT DEFAULT 'youtube'
+                        source TEXT DEFAULT 'youtube',
+                        sub_lang TEXT,
+                        retries INTEGER,
+                        custom_filename TEXT,
+                        preset_key TEXT,
+                        merge_output_format TEXT,
+                        audio_quality TEXT,
+                        speed_limit TEXT
                     )
                     """
                 )
@@ -69,16 +87,23 @@ class YouTubeHistoryRepository:
                     row[1]
                     for row in conn.execute("PRAGMA table_info(youtube_download_history)").fetchall()
                 }
-                if "archive_subdir" not in existing_columns:
-                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN archive_subdir TEXT")
-                if "source_type" not in existing_columns:
-                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN source_type TEXT")
-                if "source_name" not in existing_columns:
-                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN source_name TEXT")
-                if "url_type" not in existing_columns:
-                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN url_type TEXT")
-                if "failure_detail" not in existing_columns:
-                    conn.execute("ALTER TABLE youtube_download_history ADD COLUMN failure_detail TEXT")
+                profile_column_defaults = {
+                    "archive_subdir": "TEXT",
+                    "source_type": "TEXT",
+                    "source_name": "TEXT",
+                    "url_type": "TEXT",
+                    "failure_detail": "TEXT",
+                    "sub_lang": "TEXT",
+                    "retries": "INTEGER",
+                    "custom_filename": "TEXT",
+                    "preset_key": "TEXT",
+                    "merge_output_format": "TEXT",
+                    "audio_quality": "TEXT",
+                    "speed_limit": "TEXT",
+                }
+                for column_name, column_type in profile_column_defaults.items():
+                    if column_name not in existing_columns:
+                        conn.execute(f"ALTER TABLE youtube_download_history ADD COLUMN {column_name} {column_type}")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_youtube_history_created_at ON youtube_download_history(created_at DESC)"
                 )
@@ -113,14 +138,17 @@ class YouTubeHistoryRepository:
         return ""
 
     def _build_history_item(self, task, status=STATUS_SUCCESS, failure_stage="", failure_summary="", return_code=None):
-        display_title = task.final_title if task.final_title else task.get_display_name()
+        display_title = getattr(task, "final_title", "") or (task.get_display_name() if hasattr(task, "get_display_name") else "")
         archive_subdir = getattr(task, "archive_subdir", "")
         archive_output_path = getattr(task, "archive_output_path", "") or getattr(task, "save_path", "")
         failure_detail = getattr(task, "latest_error_detail", "") if failure_summary else ""
+        profile = getattr(task, "profile", None)
+        if profile is None:
+            profile = {}
         return {
             "title": display_title,
             "type": getattr(task, "task_type", "youtube"),
-            "url": task.url,
+            "url": getattr(task, "url", ""),
             "path": archive_output_path,
             "archive_subdir": archive_subdir,
             "source_type": getattr(task, "source_type", SOURCE_TYPE_DEFAULT),
@@ -128,41 +156,44 @@ class YouTubeHistoryRepository:
             "source_platform": getattr(task, "source_platform", SOURCE_PLATFORM_DEFAULT),
             "url_type": getattr(task, "url_type", URL_TYPE_UNKNOWN),
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "task_id": task.id,
+            "task_id": getattr(task, "id", ""),
             "status": status,
             "video_id": self._extract_video_id(task),
             "playlist_id": self._extract_playlist_id(task),
             "channel_id": getattr(task, "channel_id", "") or "",
-            "used_cookies": bool(getattr(task, "needs_cookies", False)),
+            "used_cookies": bool(getattr(task, "used_cookies", getattr(task, "needs_cookies", False))),
+            "actual_cookies_mode": getattr(task, "actual_cookies_mode", "none") or "none",
             "failure_stage": failure_stage,
             "failure_summary": failure_summary,
             "failure_detail": failure_detail,
             "return_code": return_code,
             "profile": {
-                "format": task.profile.format,
-                "sub_lang": task.profile.sub_lang,
-                "speed_limit": task.profile.speed_limit,
-                "retries": task.profile.retries,
-                "custom_filename": task.profile.custom_filename,
-                "preset_key": getattr(task.profile, "preset_key", "manual"),
-                "merge_output_format": getattr(task.profile, "merge_output_format", "mp4"),
-                "audio_quality": getattr(task.profile, "audio_quality", "192"),
+                "format": getattr(profile, "format", ""),
+                "sub_lang": getattr(profile, "sub_lang", ""),
+                "speed_limit": getattr(profile, "speed_limit", "0"),
+                "retries": getattr(profile, "retries", 3),
+                "custom_filename": getattr(profile, "custom_filename", ""),
+                "preset_key": getattr(profile, "preset_key", "manual"),
+                "merge_output_format": getattr(profile, "merge_output_format", "mp4"),
+                "audio_quality": getattr(profile, "audio_quality", "192"),
             }
         }
 
     def _insert_db_record(self, item):
         if not self.db_available:
             return False
+        profile = item.get("profile") or {}
         for attempt in range(self._db_retry_count):
             try:
-                with sqlite3.connect(self.db_path, timeout=2.0) as conn:
+                with self._get_conn() as conn:
                     conn.execute(
                         """
                         INSERT INTO youtube_download_history (
                             task_id, video_id, playlist_id, channel_id, url, task_type, url_type, status,
                             output_path, archive_subdir, source_type, source_name, format, final_title, used_cookies,
-                            failure_stage, failure_summary, failure_detail, return_code, created_at, source
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            failure_stage, failure_summary, failure_detail, return_code, created_at, source,
+                            sub_lang, retries, custom_filename, preset_key, merge_output_format, audio_quality, speed_limit
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             item.get("task_id", ""),
@@ -177,7 +208,7 @@ class YouTubeHistoryRepository:
                             item.get("archive_subdir", ""),
                             item.get("source_type", SOURCE_TYPE_DEFAULT),
                             item.get("source_name", SOURCE_NAME_DEFAULT),
-                            item.get("profile", {}).get("format", ""),
+                            profile.get("format", ""),
                             item.get("title", ""),
                             1 if item.get("used_cookies") else 0,
                             item.get("failure_stage", ""),
@@ -186,6 +217,13 @@ class YouTubeHistoryRepository:
                             item.get("return_code"),
                             item.get("time", ""),
                             item.get("source_platform", SOURCE_PLATFORM_DEFAULT),
+                            profile.get("sub_lang", ""),
+                            profile.get("retries", 3),
+                            profile.get("custom_filename", ""),
+                            profile.get("preset_key", "manual"),
+                            profile.get("merge_output_format", "mp4"),
+                            profile.get("audio_quality", "192"),
+                            profile.get("speed_limit", "0"),
                         ),
                     )
                     conn.commit()
@@ -331,14 +369,15 @@ class YouTubeHistoryRepository:
     def load(self):
         if self.db_available:
             try:
-                with sqlite3.connect(self.db_path, timeout=2.0) as conn:
+                with self._get_conn() as conn:
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
                         """
                         SELECT final_title, task_type, url, output_path, created_at, task_id, status,
                                video_id, playlist_id, channel_id, used_cookies,
                                failure_stage, failure_summary, return_code, format,
-                               source_type, source_name, source, url_type
+                               source_type, source_name, source, url_type,
+                               sub_lang, retries, custom_filename, preset_key, merge_output_format, audio_quality, speed_limit
                         FROM youtube_download_history
                         ORDER BY datetime(created_at) DESC, id DESC
                         LIMIT 200
@@ -367,6 +406,13 @@ class YouTubeHistoryRepository:
                         "return_code": row["return_code"],
                         "profile": {
                             "format": row["format"] or "",
+                            "sub_lang": row["sub_lang"] or "",
+                            "retries": row["retries"] if row["retries"] is not None else 3,
+                            "custom_filename": row["custom_filename"] or "",
+                            "preset_key": row["preset_key"] or "manual",
+                            "merge_output_format": row["merge_output_format"] or "mp4",
+                            "audio_quality": row["audio_quality"] or "192",
+                            "speed_limit": row["speed_limit"] or "0",
                         },
                     })
                 return result
@@ -385,9 +431,7 @@ class YouTubeHistoryRepository:
 
     def save_task(self, task):
         history_item = self._build_history_item(task, status=STATUS_SUCCESS)
-        db_saved = self._insert_db_record(history_item)
-        self._save_json_item(history_item)
-        return db_saved
+        return self._save_history_item(history_item)
 
     def save_failed_task(self, task, failure_stage="download", failure_summary="", return_code=None):
         history_item = self._build_history_item(
@@ -397,45 +441,71 @@ class YouTubeHistoryRepository:
             failure_summary=failure_summary,
             return_code=return_code,
         )
-        db_saved = self._insert_db_record(history_item)
-        self._save_json_item(history_item)
+        return self._save_history_item(history_item)
+
+    def _save_history_item(self, history_item):
+        """JSON 作为最终事实源先写；DB 作为冗余后写。任一失败不互相污染。"""
+        json_saved = False
+        db_saved = False
+        try:
+            self._save_json_item(history_item)
+            json_saved = True
+        except Exception as exc:
+            logger.warning("Failed to write JSON history: %s", exc)
+        try:
+            db_saved = self._insert_db_record(history_item)
+        except Exception as exc:
+            logger.warning("Failed to write DB history: %s", exc)
+        # 返回值仍以 DB 是否写成功为准（供 UI 提示“已保存到 DB/JSON”），
+        # 保证 JSON 写入优先且两源字段口径一致（由 _build_history_item 统一）。
         return db_saved
 
     def has_success_record(self, url=None, video_id=None):
-        if not self.db_available:
-            return False
-        try:
-            with sqlite3.connect(self.db_path, timeout=2.0) as conn:
-                if video_id:
-                    row = conn.execute(
-                        "SELECT 1 FROM youtube_download_history WHERE status = ? AND video_id = ? LIMIT 1",
-                        (STATUS_SUCCESS, video_id),
-                    ).fetchone()
-                    if row:
-                        return True
-                if url:
-                    row = conn.execute(
-                        "SELECT 1 FROM youtube_download_history WHERE status = ? AND url = ? LIMIT 1",
-                        (STATUS_SUCCESS, self._normalize_url(url)),
-                    ).fetchone()
-                    if row:
-                        return True
-        except sqlite3.OperationalError as exc:
-            message = str(exc).lower()
-            if "database is locked" not in message and "database table is locked" not in message:
+        if self.db_available:
+            try:
+                with self._get_conn() as conn:
+                    if video_id:
+                        row = conn.execute(
+                            "SELECT 1 FROM youtube_download_history WHERE status = ? AND video_id = ? LIMIT 1",
+                            (STATUS_SUCCESS, video_id),
+                        ).fetchone()
+                        if row:
+                            return True
+                    if url:
+                        row = conn.execute(
+                            "SELECT 1 FROM youtube_download_history WHERE status = ? AND url = ? LIMIT 1",
+                            (STATUS_SUCCESS, self._normalize_url(url)),
+                        ).fetchone()
+                        if row:
+                            return True
+            except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+                message = str(exc).lower()
+                if "database is locked" not in message and "database table is locked" not in message:
+                    self.db_available = False
+                    self.init_error = str(exc)
+            except Exception as exc:
                 self.db_available = False
                 self.init_error = str(exc)
-        except Exception as exc:
-            self.db_available = False
-            self.init_error = str(exc)
+
+        # DB 不可用或未命中时回退 JSON 做存在性判断
+        return self._json_has_success_record(url=url, video_id=video_id)
+
+    def _json_has_success_record(self, url=None, video_id=None):
+        normalized_url = self._normalize_url(url) if url else ""
+        for item in self._load_json_history():
+            if item.get("status") != STATUS_SUCCESS:
+                continue
+            if video_id and item.get("video_id") == video_id:
+                return True
+            if normalized_url and self._normalize_url(item.get("url") or "") == normalized_url:
+                return True
         return False
 
     def clear(self):
         if self.db_available:
             try:
-                with sqlite3.connect(self.db_path, timeout=2.0) as conn:
+                with self._get_conn() as conn:
                     conn.execute("DELETE FROM youtube_download_history")
-                    conn.commit()
             except sqlite3.OperationalError as exc:
                 message = str(exc).lower()
                 if "database is locked" not in message and "database table is locked" not in message:

@@ -70,6 +70,11 @@ class HookDispatcher:
         if event_name not in (config.events or []):
             return
         payload = dump_hook_payload(event_name, task)
+        script_path = (config.script_path or "").strip()
+        self.logger(
+            f"[Hook] executing trusted local hook script for event={event_name} path={script_path or 'unset'}",
+            level="WARN",
+        )
         result = run_deno_script(
             config.deno_path,
             config.script_path,

@@ -227,11 +227,12 @@ def sanitize_archive_segment(value, fallback="未命名"):
 
 
 _TASK_ID_COUNTER = itertools.count(1)
+_TASK_ID_SESSION_PREFIX = f"{int(time.time()) % 0xFFFF:04X}"
 
 
 def generate_task_id():
-    task_no = ((next(_TASK_ID_COUNTER) - 1) % 999) + 1
-    return f"{task_no:03d}"
+    task_no = ((next(_TASK_ID_COUNTER) - 1) % 9999) + 1
+    return f"{_TASK_ID_SESSION_PREFIX}-{task_no:04d}"
 
 
 @dataclass

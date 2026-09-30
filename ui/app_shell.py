@@ -187,6 +187,8 @@ class TopBar(ttk.Frame):
             "installing": "🟡", "ready": "🟢", "error": "🔴", "disabled": "⚪",
         }
         icon = icons.get(code, "⚪")
+        if code == "disabled":
+            return self.app.get_text("pot_status_disabled").format(icon=icon)
         if code == "ready":
             return self.app.get_text("pot_status_ready").format(icon=icon)
         if code == "no_node":

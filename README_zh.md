@@ -9,29 +9,11 @@
 - **适用平台**：Windows（当前仓库提供 `.exe` 组件）
 
 > English version: [`README.md`](README.md)
->
-> 深度使用说明与功能手册: [`usage_intro.md`](usage_intro.md)
 
 > [!IMPORTANT]
 > 首次运行前/首次运行时，请先进入 **设置 → 组件中心**，点击“**组件更新（yt-dlp/ffmpeg/deno）**”。
 > 程序依赖这些组件完成下载与处理；如果本地还没有组件，请先更新再使用。
 
-
----
-
-![单视频下载](images/single_video.jpg)
-
----
-
-![播放列表/频道下载](images/playlist.jpg)
-
----
-
-![下载队列管理](images/queue.jpg)
-
----
-
-![设置](images/settings.jpg)
 ---
 
 ## ✨ 功能总览
@@ -203,6 +185,8 @@ python YCB.pyw
 - **Cookies 文件**：默认 `www.youtube.com_cookies.txt`（Netscape 格式）
 - **Browser Cookies**：Chrome / Edge / Firefox
 - **PO Token**：需要 Node.js（建议 ≥18）
+- **安全提示**：启用 PO Token 修复时，程序可能执行本地 `npm install`，仅应在可信环境下使用
+- **Hook 提示**：自定义 Hook 会以当前用户权限执行本地脚本；除非脚本来源可信，否则应保持关闭
 
 ---
 
@@ -224,6 +208,8 @@ python YCB.pyw
 
 - 下载队列刷新时会尽量保留当前选中项；当前选中行保持淡蓝背景，并以粗体显示。
 - 下载队列中的原“重试选中”按钮已调整为“开始 / 重试”。
+- 任务 ID 现在包含会话前缀与递增序号，便于跨会话排查，见 [`generate_task_id()`](core/youtube_models.py:232)。
+- 组件更新链路现已拆分为 `下载 -> 校验 -> 安装` 三阶段，见 [`_stage_component_download()`](ui/app_actions.py:210)、[`_validate_staged_component()`](ui/app_actions.py:237)、[`_install_staged_component()`](ui/app_actions.py:243)。
+- 如组件更新失败，建议先判断失败点属于下载、解压、校验还是最终替换，再决定是否重试。
 - 如需完整参数说明与逐项细节，可参考 [`usage_intro.md`](usage_intro.md)（本 README 为精简版）。
 - 如需分发二进制版本，请确保同时提供源码与许可证文件。
-
