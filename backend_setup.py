@@ -60,7 +60,7 @@ FILE_REPLACE_RETRY_DELAY_SECONDS = 0.05
 FILE_REPLACE_MAX_ATTEMPTS = 20
 COMPONENT_METADATA_FILENAME = ".ycb_component_versions.json"
 HTTP_HEADERS = {
-    "User-Agent": "YCB-Installer/0.1.1",
+    "User-Agent": "YCB-Installer/0.1.2",
     "Accept": "*/*",
 }
 

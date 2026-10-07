@@ -7,7 +7,7 @@ MAIN_STATUS_READY = "ready"
 
 TRANSLATIONS = {
     LANG_ZH: {
-        "app_title": "youcanbe downloader v0.1.1",
+        "app_title": "youcanbe downloader v0.1.2",
         "tab_single": "📺 单视频下载",
         "tab_batch": "📚 播放列表 / 频道",
         "tab_queue": "📥 下载队列",
@@ -821,7 +821,7 @@ TRANSLATIONS = {
         "language_apply_hint": "语言已实时更新；如个别弹窗仍是旧文案，请关闭后重新打开。",
     },
     LANG_EN: {
-        "app_title": "youcanbe downloader v0.1.1",
+        "app_title": "youcanbe downloader v0.1.2",
         "tab_single": "📺 Single Video",
         "tab_batch": "📚 Playlist / Channel",
         "tab_queue": "📥 Queue",
